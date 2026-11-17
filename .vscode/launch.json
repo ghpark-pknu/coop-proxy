@@ -26,8 +26,8 @@
             "type": "cppdbg",
             "request": "launch",
             "program": "${workspaceFolder}/build/debug/proxy",
-            // 실행 인자는 프록시를 만들면서 채운다 (예: 노드 ID, 포트, 설정 파일)
-            "args": [],
+            // 포트 8080, 노드 이름 node1 (3단계부터 노드 목록·설정 파일 인자가 추가됨)
+            "args": ["-p", "8080", "-n", "node1"],
             "cwd": "${workspaceFolder}",
             "stopAtEntry": false,
             "externalConsole": false,
