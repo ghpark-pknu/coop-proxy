@@ -1,0 +1,20 @@
+{
+    // Makefile의 명령 줄은 탭 문자여야 하므로 공백으로 바꾸지 않는다
+    "[makefile]": {
+        "editor.insertSpaces": false,
+        "editor.detectIndentation": false
+    },
+    // C 코드는 공백 4칸 들여쓰기
+    "[c]": {
+        "editor.tabSize": 4,
+        "editor.insertSpaces": true
+    },
+    // VS Code는 기본적으로 .h를 C++ 헤더로 본다 → C 헤더로 지정
+    "files.associations": {
+        "*.h": "c"
+    },
+    // 리눅스 줄바꿈(LF)으로 저장. CRLF가 섞이면 셸 스크립트가 실행되지 않는다
+    "files.eol": "\n",
+    "files.insertFinalNewline": true,
+    "files.trimTrailingWhitespace": true
+}

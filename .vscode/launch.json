@@ -1,0 +1,43 @@
+{
+    // F5 → 선택한 구성으로 빌드 후 gdb 디버깅 시작
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "hello_server 디버그 (환경 검증용)",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/build/debug/hello_server",
+            "args": ["8080"],
+            "cwd": "${workspaceFolder}",
+            "stopAtEntry": false,
+            "externalConsole": false,
+            "MIMode": "gdb",
+            "miDebuggerPath": "/usr/bin/gdb",
+            "preLaunchTask": "build: hello",
+            "setupCommands": [
+                { "description": "변수를 보기 좋게 출력", "text": "-enable-pretty-printing", "ignoreFailures": true },
+                // 프로그램이 SIGPIPE를 무시하도록 해 두어도 gdb는 기본적으로 멈춘다.
+                // 클라이언트가 연결을 끊을 때마다 멈추지 않게 그냥 넘기도록 설정한다.
+                { "description": "SIGPIPE에서 멈추지 않기", "text": "handle SIGPIPE nostop noprint pass", "ignoreFailures": true }
+            ]
+        },
+        {
+            "name": "proxy 디버그",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/build/debug/proxy",
+            // 실행 인자는 프록시를 만들면서 채운다 (예: 노드 ID, 포트, 설정 파일)
+            "args": [],
+            "cwd": "${workspaceFolder}",
+            "stopAtEntry": false,
+            "externalConsole": false,
+            "MIMode": "gdb",
+            "miDebuggerPath": "/usr/bin/gdb",
+            "preLaunchTask": "build: debug",
+            "setupCommands": [
+                { "description": "변수를 보기 좋게 출력", "text": "-enable-pretty-printing", "ignoreFailures": true },
+                { "description": "SIGPIPE에서 멈추지 않기", "text": "handle SIGPIPE nostop noprint pass", "ignoreFailures": true }
+            ]
+        }
+    ]
+}
