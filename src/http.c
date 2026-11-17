@@ -243,7 +243,16 @@ static int listed_in_connection(const struct http_request *req, const char *name
     return 0;
 }
 
-int http_build_upstream_request(const struct http_request *req, char *out, size_t cap)
+/* 클라이언트의 조건부 헤더. 그대로 넘기면 원서버가 304(본문 없음)를 보낼 수 있어
+ * 캐시에 저장할 수 없으므로, 프록시는 이 헤더를 빼고 요청한다 */
+static int is_client_conditional(const char *name)
+{
+    return strcasecmp(name, "If-Modified-Since") == 0
+        || strcasecmp(name, "If-None-Match") == 0;
+}
+
+int http_build_upstream_request(const struct http_request *req, const char *ims,
+                                char *out, size_t cap)
 {
     size_t n = 0;
     int w;
@@ -265,10 +274,12 @@ int http_build_upstream_request(const struct http_request *req, char *out, size_
     else
         APPEND("Host: %s:%d\r\n", req->host, req->port);
     APPEND("Connection: close\r\n");
+    if (ims != NULL)
+        APPEND("If-Modified-Since: %s\r\n", ims);   /* 캐시 검증용 조건부 GET */
 
     for (int i = 0; i < req->nheaders; i++) {
         const char *name = req->headers[i].name;
-        if (is_hop_by_hop(name) || listed_in_connection(req, name))
+        if (is_hop_by_hop(name) || listed_in_connection(req, name) || is_client_conditional(name))
             continue;
         APPEND("%s: %s\r\n", name, req->headers[i].value);
     }
@@ -324,6 +335,67 @@ void http_send_error(int fd, int status, const char *detail)
     if ((size_t)rlen >= sizeof resp)
         rlen = (int)sizeof resp - 1;
     net_write_all(fd, resp, (size_t)rlen);
+}
+
+int http_parse_response_head(const char *buf, size_t len, struct http_response_info *ri)
+{
+    memset(ri, 0, sizeof *ri);
+    ri->content_length = -1;
+
+    size_t head_len = find_head_end(buf, len);
+    if (head_len == 0)
+        return -1;
+    ri->head_len = head_len;
+
+    ri->status = http_parse_status(buf, len);
+    if (ri->status == 0)
+        return -1;
+
+    /* 상태 줄 다음 줄부터 헤더를 한 줄씩 본다 (버퍼를 수정하지 않고 길이로 다룸) */
+    const char *p   = memchr(buf, '\n', head_len);
+    const char *end = buf + head_len;
+    if (p == NULL)
+        return -1;
+    p++;
+
+    while (p < end) {
+        const char *nl = memchr(p, '\n', (size_t)(end - p));
+        if (nl == NULL)
+            break;
+        size_t llen = (size_t)(nl - p);
+        if (llen > 0 && p[llen - 1] == '\r')
+            llen--;
+        if (llen == 0)
+            break;                                  /* 빈 줄 = 헤더 끝 */
+
+        const char *colon = memchr(p, ':', llen);
+        if (colon != NULL) {
+            size_t nlen = (size_t)(colon - p);
+            const char *v = colon + 1;
+            const char *vend = p + llen;
+            while (v < vend && (*v == ' ' || *v == '\t'))
+                v++;
+            size_t vlen = (size_t)(vend - v);
+
+            if (nlen == 14 && strncasecmp(p, "Content-Length", 14) == 0) {
+                ri->content_length = strtoll(v, NULL, 10);
+            } else if (nlen == 13 && strncasecmp(p, "Last-Modified", 13) == 0) {
+                if (vlen >= sizeof ri->last_modified)
+                    vlen = sizeof ri->last_modified - 1;
+                memcpy(ri->last_modified, v, vlen);
+                ri->last_modified[vlen] = '\0';
+            } else if (nlen == 13 && strncasecmp(p, "Cache-Control", 13) == 0) {
+                char val[256];
+                size_t n = vlen < sizeof val - 1 ? vlen : sizeof val - 1;
+                memcpy(val, v, n);
+                val[n] = '\0';
+                if (strcasestr(val, "no-store") || strcasestr(val, "private"))
+                    ri->no_store = 1;
+            }
+        }
+        p = nl + 1;
+    }
+    return 0;
 }
 
 int http_parse_status(const char *buf, size_t len)

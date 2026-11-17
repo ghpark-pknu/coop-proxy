@@ -32,6 +32,12 @@ int net_set_timeouts(int fd, int timeout_ms);
 /* len 바이트를 모두 보낼 때까지 반복한다. 성공 0, 실패 -1 */
 int net_write_all(int fd, const void *buf, size_t len);
 
+/* 떨어져 있는 여러 조각을 시스템 호출 한 번에 이어서 보낸다 (모으기 쓰기, gather write).
+ * 조각을 send()로 따로 보내면 작은 TCP 세그먼트가 여러 개 생겨 Nagle 알고리즘
+ * 때문에 지연될 수 있다. iov 배열은 진행 상황에 따라 수정된다. 성공 0, 실패 -1 */
+struct iovec;
+int net_writev_all(int fd, struct iovec *iov, int iovcnt);
+
 /* 경과 시간 측정용 현재 시각(ms). 시스템 시계를 바꿔도 거꾸로 가지 않는 단조 시계 */
 long long net_now_ms(void);
 

@@ -44,9 +44,15 @@ void log_request(const struct req_log *r)
     if (r->status > 0)
         snprintf(status, sizeof status, "%d", r->status);
 
+    char result[48];
+    if (r->note)
+        snprintf(result, sizeof result, "%s(%s)", outcome_name(r->outcome), r->note);
+    else
+        snprintf(result, sizeof result, "%s", outcome_name(r->outcome));
+
     char line[1024];
     snprintf(line, sizeof line, "%s [%s] %s %s %.300s %s %lldB %lldms %s\n",
-             ts, g_node, r->client, r->method, r->target, status, r->bytes, r->ms, r->result);
+             ts, g_node, r->client, r->method, r->target, status, r->bytes, r->ms, result);
     fputs(line, stdout);
 }
 

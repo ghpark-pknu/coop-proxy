@@ -29,17 +29,28 @@ coop-proxy/
 | `make hello` | 환경 검증용 서버 | `build/debug/hello_server` |
 | `make clean` | 빌드 결과물 삭제 | |
 
-## 실행 (1단계: 중계 프록시)
+## 실행
 
 ```bash
 python3 tools/gen_files.py                      # 테스트 파일 생성 → ~/coop-data/www
 python3 tools/origin.py --port 9000             # 터미널 A: 원서버
-./build/debug/proxy -p 8080                     # 터미널 B: 프록시
-curl -x http://127.0.0.1:8080 http://127.0.0.1:9000/page.html   # 터미널 C
-./scripts/test_stage1.sh                        # 1단계 완료 기준 자동 점검
+./build/debug/proxy -p 8080 -b conf/blocklist.txt   # 터미널 B: 프록시
+curl -i -x http://127.0.0.1:8080 http://127.0.0.1:9000/page.html   # 터미널 C (X-Cache 확인)
+./scripts/test_stage1.sh                        # 1단계(중계) 자동 점검
+./scripts/test_stage2.sh                        # 2단계(캐시) 자동 점검
 ```
 
-프록시 옵션: `-p 포트` `-n 노드이름` `-c 연결제한ms` `-t 송수신제한ms` `-q 기록끔`
+| 옵션 | 뜻 | 기본값 |
+|---|---|---|
+| `-p PORT` | 대기 포트 | 8080 |
+| `-n NAME` | 노드 이름 | node1 |
+| `-c MS` | 원서버 연결 제한 시간 | 3000 |
+| `-t MS` | 송수신 제한 시간 | 5000 |
+| `-s SIZE` | 캐시 용량 (예: 64M, 0이면 캐시 끔) | 64M |
+| `-o SIZE` | 객체 하나의 상한 | 1M |
+| `-v SEC` | 검증 주기 | 60 |
+| `-b FILE` | 차단 목록 | 없음 |
+| `-q` | 요청 기록 끄기 | 꺼짐 |
 
 ## 개발 환경
 

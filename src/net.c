@@ -13,6 +13,7 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/time.h>
+#include <sys/uio.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -164,6 +165,34 @@ int net_write_all(int fd, const void *buf, size_t len)
         }
         p   += n;
         len -= (size_t)n;
+    }
+    return 0;
+}
+
+int net_writev_all(int fd, struct iovec *iov, int iovcnt)
+{
+    while (iovcnt > 0) {
+        struct msghdr msg;
+        memset(&msg, 0, sizeof msg);
+        msg.msg_iov    = iov;
+        msg.msg_iovlen = (size_t)iovcnt;
+
+        ssize_t n = sendmsg(fd, &msg, MSG_NOSIGNAL);
+        if (n < 0) {
+            if (errno == EINTR)
+                continue;
+            return -1;
+        }
+        /* 보낸 만큼 앞의 조각들을 건너뛴다 (일부만 보낸 조각은 시작 위치를 옮김) */
+        while (iovcnt > 0 && (size_t)n >= iov->iov_len) {
+            n -= (ssize_t)iov->iov_len;
+            iov++;
+            iovcnt--;
+        }
+        if (iovcnt > 0) {
+            iov->iov_base = (char *)iov->iov_base + n;
+            iov->iov_len -= (size_t)n;
+        }
     }
     return 0;
 }

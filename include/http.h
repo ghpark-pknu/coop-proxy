@@ -57,8 +57,24 @@ int http_parse_request(char *buf, struct http_request *req);
  * 성공 0, 형식 오류 -1, http가 아닌 스킴(https 등) -2 */
 int http_parse_url(struct http_request *req);
 
-/* 원서버에 보낼 HTTP/1.0 요청을 out에 만든다. 반환: 길이, 공간 부족 -1 */
-int http_build_upstream_request(const struct http_request *req, char *out, size_t cap);
+/* 원서버에 보낼 HTTP/1.0 요청을 out에 만든다. 반환: 길이, 공간 부족 -1
+ * ims가 NULL이 아니면 "If-Modified-Since: ims"를 붙인 조건부 요청을 만든다.
+ * 클라이언트가 보낸 조건부 헤더(If-Modified-Since, If-None-Match)는 빼고 보낸다.
+ * (프록시가 캐시에 저장할 "완전한 200 응답"을 받기 위해서) */
+int http_build_upstream_request(const struct http_request *req, const char *ims,
+                                char *out, size_t cap);
+
+/* 원서버 응답 헤더에서 캐시 판단에 필요한 정보 */
+struct http_response_info {
+    int       status;             /* 200, 304 ... */
+    size_t    head_len;           /* 상태 줄 + 헤더 + 빈 줄의 길이 */
+    long long content_length;     /* Content-Length 값 (없으면 -1) */
+    int       no_store;           /* Cache-Control에 no-store 또는 private가 있으면 1 */
+    char      last_modified[64];  /* Last-Modified 값 (없으면 빈 문자열) */
+};
+
+/* buf[0..len)에 들어 있는 응답의 헤더를 해석한다. 헤더 끝이 없거나 형식이 틀리면 -1 */
+int http_parse_response_head(const char *buf, size_t len, struct http_response_info *ri);
 
 /* 상태 코드에 맞는 오류 응답(HTML)을 보낸다 */
 void http_send_error(int fd, int status, const char *detail);

@@ -42,7 +42,8 @@ ORIGIN_PID=$!
 python3 tools/origin.py --port $SLOW_PORT --dir "$WWW" --quiet --delay 3 > /dev/null 2>&1 &
 SLOW_PID=$!
 # 송수신 제한 1.5초 → 3초 늦는 원서버는 504가 되어야 한다
-"$BIN" -p $PROXY_PORT -t 1500 > "$LOGDIR/test_proxy.log" 2>&1 &
+# -s 0: 캐시를 끈다 (2단계부터 캐시가 기본으로 켜지므로, 순수 중계 기능만 점검)
+"$BIN" -p $PROXY_PORT -t 1500 -s 0 > "$LOGDIR/test_proxy.log" 2>&1 &
 PROXY_PID=$!
 
 cleanup() {

@@ -1,10 +1,12 @@
 /*
  * main.c — 프로그램 시작점
  *
- *  - 실행 인자 해석
+ *  - 실행 인자 해석, 차단 목록 읽기, 캐시 생성
  *  - 시그널 준비: SIGPIPE 무시, Ctrl+C(SIGINT)·SIGTERM은 전용 스레드가 받아 정상 종료
  *  - 리스닝 소켓 → accept → 연결마다 작업 스레드 생성
+ *  - 종료: 진행 중인 연결이 끝나길 기다린 뒤 통계 출력, 캐시 해제
  */
+#include "filter.h"
 #include "log.h"
 #include "net.h"
 #include "proxy.h"
@@ -33,9 +35,42 @@ static void usage(const char *prog)
             "  -n NAME   노드 이름 (기본 node1)\n"
             "  -c MS     원서버 연결 제한 시간, 밀리초 (기본 3000)\n"
             "  -t MS     송수신 제한 시간, 밀리초 (기본 5000)\n"
+            "  -s SIZE   캐시 용량, 예: 64M, 512K (기본 64M, 0이면 캐시 끔)\n"
+            "  -o SIZE   캐시에 저장할 객체 하나의 상한 (기본 1M)\n"
+            "  -v SEC    검증 주기, 초: 저장 후 이 시간이 지나면 원서버에 확인 (기본 60)\n"
+            "  -b FILE   차단 목록 파일 (예: conf/blocklist.txt)\n"
             "  -q        요청 기록을 출력하지 않음 (부하 실험용)\n"
             "  -h        도움말\n",
             prog);
+}
+
+/* "64M", "512K", "1048576" 같은 크기 문자열을 바이트로 바꾼다. 실패하면 -1 */
+static long long parse_size(const char *s)
+{
+    char *end;
+    errno = 0;
+    long long v = strtoll(s, &end, 10);
+    if (errno != 0 || end == s || v < 0)
+        return -1;
+    switch (*end) {
+    case '\0':           break;
+    case 'k': case 'K':  v *= 1024LL;               end++; break;
+    case 'm': case 'M':  v *= 1024LL * 1024;        end++; break;
+    case 'g': case 'G':  v *= 1024LL * 1024 * 1024; end++; break;
+    default:             return -1;
+    }
+    return *end == '\0' ? v : -1;
+}
+
+/* 바이트 수를 사람이 읽기 좋게 */
+static void human_size(size_t b, char *out, size_t cap)
+{
+    if (b >= 1024 * 1024)
+        snprintf(out, cap, "%.1fMB", (double)b / (1024.0 * 1024.0));
+    else if (b >= 1024)
+        snprintf(out, cap, "%.1fKB", (double)b / 1024.0);
+    else
+        snprintf(out, cap, "%zuB", b);
 }
 
 /* 문자열을 범위 안의 정수로 바꾼다. 실패하면 -1 */
@@ -55,10 +90,14 @@ static int parse_args(int argc, char *argv[], struct proxy_config *cfg)
     cfg->port               = 8080;
     cfg->connect_timeout_ms = 3000;
     cfg->io_timeout_ms      = 5000;
+    cfg->cache_capacity     = 64 * 1024 * 1024;
+    cfg->max_object         = 1024 * 1024;
+    cfg->validate_sec       = 60;
     snprintf(cfg->node, sizeof cfg->node, "node1");
 
+    long long size;
     int opt;
-    while ((opt = getopt(argc, argv, "p:n:c:t:qh")) != -1) {
+    while ((opt = getopt(argc, argv, "p:n:c:t:s:o:v:b:qh")) != -1) {
         switch (opt) {
         case 'p':
             if ((cfg->port = parse_int(optarg, 1, 65535)) < 0) {
@@ -81,6 +120,29 @@ static int parse_args(int argc, char *argv[], struct proxy_config *cfg)
                 return -1;
             }
             break;
+        case 's':
+            if ((size = parse_size(optarg)) < 0) {
+                fprintf(stderr, "잘못된 캐시 용량: %s\n", optarg);
+                return -1;
+            }
+            cfg->cache_capacity = (size_t)size;
+            break;
+        case 'o':
+            if ((size = parse_size(optarg)) <= 0) {
+                fprintf(stderr, "잘못된 객체 상한: %s\n", optarg);
+                return -1;
+            }
+            cfg->max_object = (size_t)size;
+            break;
+        case 'v':
+            if ((cfg->validate_sec = parse_int(optarg, 0, 86400)) < 0) {
+                fprintf(stderr, "잘못된 검증 주기: %s\n", optarg);
+                return -1;
+            }
+            break;
+        case 'b':
+            snprintf(cfg->blocklist, sizeof cfg->blocklist, "%s", optarg);
+            break;
         case 'q':
             cfg->quiet = 1;
             break;
@@ -88,6 +150,8 @@ static int parse_args(int argc, char *argv[], struct proxy_config *cfg)
             return -1;
         }
     }
+    if (cfg->cache_capacity > 0 && cfg->max_object > cfg->cache_capacity)
+        cfg->max_object = cfg->cache_capacity;      /* 객체 하나가 캐시 전체보다 클 수는 없다 */
     return 0;
 }
 
@@ -119,7 +183,15 @@ int main(int argc, char *argv[])
 
     setvbuf(stdout, NULL, _IOLBF, 0);   /* 기록을 파일로 돌려도 한 줄씩 바로 쓰이게 */
     log_init(cfg.node, cfg.quiet);
-    proxy_init(&cfg);
+
+    if (cfg.blocklist[0] != '\0' && filter_load(cfg.blocklist) < 0) {
+        log_info("차단 목록 파일을 읽을 수 없습니다: %s", cfg.blocklist);
+        return 1;
+    }
+    if (proxy_init(&cfg) < 0) {
+        log_info("캐시를 만들 수 없습니다.");
+        return 1;
+    }
 
     /* 끊긴 연결에 쓰면 SIGPIPE가 와서 프로세스가 죽는다 → 무시하고 EPIPE 오류로 처리 */
     signal(SIGPIPE, SIG_IGN);
@@ -151,6 +223,16 @@ int main(int argc, char *argv[])
     log_info("포트 %d에서 대기 중 (연결 제한 %dms, 송수신 제한 %dms)%s",
              cfg.port, cfg.connect_timeout_ms, cfg.io_timeout_ms,
              cfg.quiet ? ", 요청 기록 끔" : "");
+    if (cfg.cache_capacity > 0) {
+        char cap[32], obj[32];
+        human_size(cfg.cache_capacity, cap, sizeof cap);
+        human_size(cfg.max_object, obj, sizeof obj);
+        log_info("캐시 용량 %s, 객체 상한 %s, 검증 주기 %d초", cap, obj, cfg.validate_sec);
+    } else {
+        log_info("캐시 끔 (모든 요청을 원서버로 중계)");
+    }
+    if (filter_count() > 0)
+        log_info("차단 목록 %zu개 (%s)", filter_count(), cfg.blocklist);
 
     unsigned long accepted = 0;
     for (;;) {
@@ -184,10 +266,14 @@ int main(int argc, char *argv[])
         inet_ntop(AF_INET, &cli.sin_addr, ip, sizeof ip);
         snprintf(conn->addr, sizeof conn->addr, "%s:%u", ip, ntohs(cli.sin_port));
 
+        /* 진행 중인 연결 수를 "스레드를 만들기 전에" 늘린다. 스레드 안에서 늘리면,
+         * 스레드가 실행되기 전에 종료 절차가 "연결 0개"로 잘못 판단할 수 있다 */
+        proxy_conn_opened();
         pthread_t tid;
         int err = pthread_create(&tid, &attr, proxy_handle_connection, conn);
         if (err != 0) {
             log_info("작업 스레드를 만들 수 없습니다: %s", strerror(err));
+            proxy_conn_aborted();
             close(cfd);
             free(conn);
             continue;
@@ -198,6 +284,18 @@ int main(int argc, char *argv[])
     pthread_attr_destroy(&attr);
     close(g_listen_fd);
     pthread_join(sig_tid, NULL);
+
+    /* 진행 중인 연결이 끝나길 최대 5초 기다린다. 작업 스레드가 아직 캐시를 쓰는 중에
+     * 캐시를 해제하면 해제된 메모리를 읽게 되기 때문이다 */
+    for (int i = 0; i < 500 && proxy_active_conns() > 0; i++)
+        usleep(10 * 1000);
+
     log_info("종료: 연결 %lu개를 처리했습니다.", accepted);
+    proxy_report();
+    if (proxy_active_conns() == 0)
+        proxy_cleanup();
+    else
+        log_info("끝나지 않은 연결 %d개가 있어 캐시를 해제하지 않고 종료합니다.", proxy_active_conns());
+    filter_free();
     return 0;
 }
