@@ -7,6 +7,7 @@
  *   "requests": { "client": 120, "peer": 41 },
  *   "outcomes": { "HIT": 90, "VALIDATED": 0, ..., "FORWARD": 70, "BLOCKED": 0, "ERROR": 0 },
  *   "origin_requests": 21, "peer_failures": 0, "bytes": 1234567,
+ *   "memory": { "heap_in_use": 4793616, "heap_system": 22020096 },          ← 8단계
  *   "latency": {
  *     "bounds_us": [50, 100, ...],                      ← 히스토그램 구간 경계
  *     "client": { "count": 120, "sum_us": 98765, "max_us": 4321, "hist": [ ... ] },
@@ -31,6 +32,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <malloc.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -162,6 +164,17 @@ static void send_stats(int cfd)
 
     jprintf(b, ",\"origin_requests\":%lu,\"peer_failures\":%lu,\"bytes\":%llu",
             s.origin_requests, s.peer_failures, s.bytes);
+
+    /* 힙 메모리 (glibc mallinfo2, 모든 아레나의 합). 8단계 장시간 부하 시험에서 누수를 판단하는 데 쓴다.
+     *   heap_in_use : 지금 malloc으로 받아 아직 free하지 않은 바이트 (누수가 있으면 계속 는다)
+     *   heap_system : 할당기가 운영체제에서 받아 둔 바이트. free한 메모리도 다음 malloc을 위해
+     *                 쥐고 있으므로 heap_in_use보다 크고, RSS(실제 차지한 물리 메모리)에 포함된다.
+     * 스레드마다 다른 아레나(할당 구역)를 쓸 수 있어서, 크기가 제각각인 객체를 오래 할당·해제하면
+     * heap_system은 조각난 빈 공간 때문에 천천히 늘 수 있다. 이것은 누수가 아니다.
+     * 새니타이저 빌드(asan·tsan)는 자기 할당기를 쓰므로 둘 다 0으로 나온다 */
+    struct mallinfo2 mi = mallinfo2();
+    jprintf(b, ",\"memory\":{\"heap_in_use\":%zu,\"heap_system\":%zu}",
+            mi.uordblks + mi.hblkhd, mi.arena + mi.hblkhd);
 
     jprintf(b, ",\"latency\":{\"bounds_us\":[");
     for (int i = 0; i < STATS_NBUCKETS - 1; i++)

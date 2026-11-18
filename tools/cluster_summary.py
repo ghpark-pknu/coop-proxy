@@ -38,7 +38,8 @@ def main():
     if env:
         print(f"조건: 노드 3개, 객체 {env.get('objects', '?')}개({env.get('objects_mb', '?')}MB), "
               f"원서버 지연 {env.get('delay', '?')}초, 요청 {env.get('requests', '?')}개(예열 {env.get('warmup', '?')}개 제외), "
-              f"동시 {env.get('conc', '?')}, 반복 {env.get('repeat', '?')}번의 중앙값")
+              f"동시 {env.get('conc', '?')}, 반복 {env.get('repeat', '?')}번의 중앙값"
+              + (f", 요청 속도 상한 초당 {float(env['rate']):g}개" if float(env.get("rate") or 0) > 0 else ""))
 
     cols = [("히트율", "hit_ratio", lambda v: f"{100 * v:.1f}%"),
             ("원서버/1000", "origin_per_1000", lambda v: f"{v:.1f}"),

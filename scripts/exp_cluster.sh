@@ -7,7 +7,11 @@
 #                                        반복 2번 (약 10분)
 #
 # 바꿀 수 있는 값: SIZES="512K 1M 2M 4M 8M 16M"  N=6000  WARMUP=3000  CONC=16  DELAY=0.05  ZIPF=0.8
-#                  REPEAT=2  SEED=2026
+#                  REPEAT=2  SEED=2026  RATE=0
+#   RATE: 초당 요청 수 상한 (0 = 제한 없음, 8단계). loadgen.py는 Python이라 초당 약 2,000개가 한계여서,
+#         히트율이 높아 요청이 빨리 끝나는 조건에서는 부하 생성기 자신이 줄을 세워 응답 시간이 부풀려진다.
+#         RATE=250처럼 한계보다 한참 낮게 주면 "HIT 요청만의 응답 시간"이 프록시와 노드 간 전달만 반영한다
+#         (예열 요청에도 같은 상한이 걸리므로 측정 1회에 (N + WARMUP) ÷ RATE초가 걸린다)
 #
 # 측정 조건
 #   - 원서버 응답 지연 50ms: 멀리 있는 원서버 흉내. 원서버에 다녀오는 비용이 응답 시간에 드러난다
@@ -31,6 +35,8 @@ CONC=${CONC:-16}
 DELAY=${DELAY:-0.05}
 ZIPF=${ZIPF:-0.8}
 SEED=${SEED:-2026}
+RATE=${RATE:-0}
+[[ "$RATE" =~ ^[0-9]+([.][0-9]+)?$ ]] || { echo "RATE는 0 이상의 수여야 합니다 (입력값: $RATE)"; exit 1; }
 DATA=${COOP_DATA:-$HOME/coop-data}
 WWW="$DATA/www"
 LOGDIR="$DATA/logs"
@@ -93,14 +99,17 @@ runs=$(( REPEAT * $(wc -w <<< "$SIZES") * 2 ))
     echo "date=$(date '+%Y-%m-%d %H:%M:%S')"
     echo "commit=$(git rev-parse --short HEAD 2>/dev/null)$(git diff --quiet 2>/dev/null || echo '+수정됨')"
     echo "cpu_model=$(lscpu | sed -n 's/^Model name: *//p')"
-    echo "sizes=$SIZES requests=$N warmup=$WARMUP conc=$CONC delay=$DELAY zipf=$ZIPF repeat=$REPEAT seed=$SEED"
+    echo "sizes=$SIZES requests=$N warmup=$WARMUP conc=$CONC delay=$DELAY zipf=$ZIPF repeat=$REPEAT seed=$SEED rate=$RATE"
     echo "objects=$NOBJ objects_mb=$OBJMB nodes=3"
     echo "proxy_args=-q -v 600 -s <용량> (독립: -p 포트 / 클러스터: -C 노드목록)"
 } > "$ENVF"
 echo "rep,mode,size,size_bytes,requests,failed,hit_ratio,origin_requests,origin_per_1000,mean_ms,p50_ms,p90_ms,p99_ms,rps,forwarded,objects,evictions,loadgen_rc,hit_mean_ms,miss_mean_ms" > "$CSV"
 
 echo "[준비] 노드 3개, 객체 ${NOBJ}개(${OBJMB}MB), 원서버 지연 ${DELAY}초, 요청 ${N}개(예열 ${WARMUP}개 제외), 동시 ${CONC}"
-echo "[준비] 측정 ${runs}회"
+echo "[준비] 측정 ${runs}회$(python3 -c "
+import sys
+r, n, w = float(sys.argv[1]), int(sys.argv[2]), int(sys.argv[3])
+print(f', 요청 속도 상한 초당 {r:g}개 (1회에 약 {(n + w) / r:.0f}초)' if r > 0 else '')" "$RATE" "$N" "$WARMUP")"
 python3 tools/origin.py --port $ORIGIN_PORT --dir "$WWW" --delay "$DELAY" --quiet > "$LOGDIR/exp_cluster_origin.log" 2>&1 &
 ORIGIN_PID=$!
 wait_port $ORIGIN_PORT
@@ -125,7 +134,7 @@ for rep in $(seq 1 "$REPEAT"); do
 
             python3 tools/loadgen.py --proxies "$PROXIES" --origin "127.0.0.1:$ORIGIN_PORT" \
                 --manifest "$WWW/manifest.json" -n "$N" --warmup "$WARMUP" -c "$CONC" --zipf "$ZIPF" \
-                --seed "$SEED" --stats --json "$TMP/r.json" --csv "$TMP/req.csv" -q > "$TMP/r.txt" 2>&1
+                --rate "$RATE" --seed "$SEED" --stats --json "$TMP/r.json" --csv "$TMP/req.csv" -q > "$TMP/r.txt" 2>&1
             rc=$?
             nodes=$(for p in "${PORTS[@]}"; do curl -s "http://127.0.0.1:$p/__stats"; echo; done)
             stop_nodes

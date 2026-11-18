@@ -3,6 +3,7 @@
 
   python3 tools/plot_results.py lock    results/lock_X.csv       → results/lock_X_figs/
   python3 tools/plot_results.py cluster results/cluster_X.csv    → results/cluster_X_figs/
+  python3 tools/plot_results.py soak    results/soak_X.csv       → results/soak_X_figs/   (8단계)
 
 같은 조건을 여러 번 잰 값은 중앙값을 점으로, 최소~최대를 세로 막대(오차 막대)로 그린다.
 
@@ -25,7 +26,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt                     # noqa: E402
 from matplotlib import font_manager                 # noqa: E402
-from matplotlib.ticker import FuncFormatter, LogLocator, NullFormatter  # noqa: E402
+from matplotlib.ticker import FuncFormatter, LogLocator, MaxNLocator, NullFormatter  # noqa: E402
 
 from exp_common import (bench_path, group_by, median_of, num, read_env, read_rows,  # noqa: E402
                         sum_sq)
@@ -246,7 +247,8 @@ def plot_cluster(csv_path):
     total_mb = env.get("objects_mb")
     cond = (f"노드 3개 · 원서버 지연 {env.get('delay', '?')}초 · 요청 {env.get('requests', '?')}개 "
             f"(예열 {env.get('warmup', '?')}개 제외) · 동시 {env.get('conc', '?')} · Zipf {env.get('zipf', '?')}"
-            + (f" · 객체 전체 {total_mb}MB" if total_mb else ""))
+            + (f" · 객체 전체 {total_mb}MB" if total_mb else "")
+            + (f" · 요청 속도 상한 초당 {float(env['rate']):g}개" if float(env.get("rate") or 0) > 0 else ""))
     print(f"그림 → {out}/")
 
     def draw(ax, field, scale=1.0):
@@ -283,13 +285,58 @@ def plot_cluster(csv_path):
     save(fig, out, "cluster_latency.png", "응답 시간")
 
 
+# ---------------------------------------------------------------- 8단계: 장시간 부하
+def plot_soak(csv_path):
+    rows = read_rows([csv_path])
+    env = read_env(csv_path)
+    nodes = sorted({r["node"] for r in rows})
+    total = max(int(r["t_sec"]) for r in rows)
+    minutes = total >= 180                                   # 3분 이상이면 가로축을 분 단위로
+    tx = (lambda t: t / 60) if minutes else (lambda t: t)
+    out = stem_dir(csv_path)
+    reqs = sum(max(int(r["requests"]) for r in rows if r["node"] == n) for n in nodes)
+    cond = (f"노드 {len(nodes)}개 · 캐시 {env.get('size', '?')} · 검증 주기 {env.get('validate', '?')}초 · "
+            f"동시 {env.get('conc', '?')} · 객체 {env.get('objects', '?')}개({env.get('objects_mb', '?')}MB) · "
+            f"{env.get('interval', '?')}초마다 기록 · 처리한 요청 {reqs:,}개 (노드 간 전달 포함) · "
+            f"첫 점 = 부하 전, 마지막 점 = 부하가 끝나고 연결이 모두 닫힌 뒤")
+    print(f"그림 → {out}/")
+
+    has_heap = "heap_in_use_kb" in rows[0] and any(int(r["heap_in_use_kb"]) > 0 for r in rows)
+    panels = [("rss_kb", "RSS: 실제로 차지한 물리 메모리 (MB)", 1 / 1024)]
+    if has_heap:
+        panels.append(("heap_in_use_kb", "사용 중인 힙: free하지 않은 메모리 (MB)", 1 / 1024))
+    panels += [("fds", "열린 파일 수", 1), ("threads", "스레드 수", 1)]
+    ncol = 2 if len(panels) == 4 else 3
+    fig, axes = plt.subplots(len(panels) // ncol, ncol, figsize=(10, 7) if ncol == 2 else (12, 3.7), squeeze=False)
+    axes = axes.ravel()
+    for ax, (field, title, scale) in zip(axes, panels):
+        for i, n in enumerate(nodes):
+            pts = sorted((int(r["t_sec"]), int(r[field])) for r in rows if r["node"] == n and int(r[field]) >= 0)
+            ax.plot([tx(t) for t, _ in pts], [v * scale for _, v in pts], color=SERIES[i],
+                    label=n if ax is axes[0] else None, solid_joinstyle="round", zorder=3)
+        ax.set_title(title)
+        ax.set_xlabel("경과 시간 (분)" if minutes else "경과 시간 (초)")
+        ax.set_xlim(0, tx(total))
+        ax.set_ylim(bottom=0, top=ax.get_ylim()[1] * 1.08)
+        if field not in ("rss_kb", "heap_in_use_kb"):
+            ax.yaxis.set_major_locator(MaxNLocator(integer=True))      # 개수는 정수 눈금만
+    if has_heap:                                                        # 두 메모리 그림은 같은 눈금으로 비교
+        top = max(axes[0].get_ylim()[1], axes[1].get_ylim()[1])
+        axes[0].set_ylim(0, top)
+        axes[1].set_ylim(0, top)
+    fig.tight_layout(h_pad=2.0)
+    fig.legend(loc="upper center", ncol=len(nodes), bbox_to_anchor=(0.5, 1.04 if ncol == 2 else 1.08))
+    fig.text(0.0, -0.03 if ncol == 2 else -0.05, cond, color=MUTED, fontsize=7.5)
+    save(fig, out, "soak_memory_fd.png", "노드별 메모리·열린 파일·스레드 수의 시간 변화")
+
+
 def main():
     ap = argparse.ArgumentParser(description="실험 결과 그래프")
-    ap.add_argument("kind", choices=("lock", "cluster"))
+    ap.add_argument("kind", choices=("lock", "cluster", "soak"))
     ap.add_argument("csv")
     args = ap.parse_args()
     setup_style()
-    (plot_lock if args.kind == "lock" else plot_cluster)(args.csv)
+    {"lock": plot_lock, "cluster": plot_cluster, "soak": plot_soak}[args.kind](args.csv)
     return 0
 
 

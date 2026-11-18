@@ -47,6 +47,7 @@ curl -i -x http://127.0.0.1:8080 http://127.0.0.1:9000/page.html   # 터미널 C
 ./scripts/test_stage5.sh                        # 5단계(락 전략: 전역 mutex / 샤딩) 자동 점검
 ./scripts/test_stage6.sh                        # 6단계 측정 도구(loadc) 점검
 ./scripts/test_stage7.sh                        # 7단계 실험 분석 도구 점검 (실험 스크립트를 아주 작게 실제로 돌림)
+./scripts/test_stage8.sh                        # 8단계 검증·진단 스크립트 점검 (valgrind 필요)
 ```
 
 > 코드를 통째로 다른 시점으로 바꾼 뒤(`git reset`, 다른 커밋 `checkout`, 압축 덮어쓰기)에는
@@ -161,6 +162,34 @@ python3 tools/plot_results.py cluster results/cluster_X.csv
 | `tools/cluster_summary.py` | 노드당 용량별 히트율, 원서버 요청(1000개당), 평균·p50·p99, HIT만의 응답 시간(다른 노드를 거치는 비용), 캐시 객체 수 |
 | `tools/plot_results.py` | 보고서용 PNG. 한글 글꼴이 없으면 Windows의 맑은 고딕을 WSL에서 불러오고, 그래도 없으면 `sudo apt install fonts-nanum` 안내 |
 | `tools/exp_common.py` | 위 도구들이 함께 쓰는 함수: 결과 파일 읽기, 프록시와 같은 해시(FNV-1a, mix64)로 샤드 계산 |
+
+### 검증과 병목 진단 (8단계)
+
+```bash
+./scripts/diag_main.sh                                  # 메인(accept) 스레드 진단: 동시 8·64 (약 1분)
+./scripts/soak.sh                                       # 장시간 부하: 클러스터 3노드, 30분 (MIN=60이면 60분)
+python3 tools/plot_results.py soak results/soak_X.csv   # 메모리·열린 파일·스레드 수의 시간 변화
+./scripts/memcheck.sh                                   # Valgrind memcheck: 누수·메모리 오류·닫지 않은 파일
+RATE=250 REPEAT=1 ./scripts/exp_cluster.sh              # 실험 ② 보충: 요청 속도 상한 → HIT 응답 시간을 부하 생성기 한계 없이
+```
+
+| 스크립트 | 확인하는 것 | 판정 기준 |
+|---|---|---|
+| `diag_main.sh` | 실험 ①의 처리량 천장이 메인 스레드 때문인가 | accept 대기열(Recv-Q)이 늘 차 있고 메인 스레드가 쉬지 않으면(실행 + 실행 대기 ≥ 90%) 메인 스레드 병목 |
+| `soak.sh` | 오래 돌려도 자원이 쌓이지 않는가 | 열린 파일·스레드 수가 부하 전과 같아짐, 사용 중인 힙(`/__stats`의 `memory.heap_in_use`) 뒤쪽 절반 기울기 < 시간당 3MB, 실패 0 |
+| `memcheck.sh` | ASan과 다른 방법(Valgrind)으로 메모리 검사 | definitely·indirectly lost 0, 메모리 오류 0, 프록시가 닫지 않은 파일 0 |
+| `exp_cluster.sh` + `RATE` | 실험 ②의 HIT 응답 시간에서 부하 생성기(Python) 한계를 뺌 | — |
+
+- `diag_main.sh`: 대기 소켓의 Recv-Q(연결 수립은 끝났지만 아직 `accept()`로 꺼내지 않은 연결 수)를
+  0.1초마다 읽고, `/proc/PID/task/PID/schedstat`으로 메인 스레드의 시간을 실행 / 실행 대기 / 잠듦으로 나눈다.
+  결과는 `results/diag_날짜_시각.csv`.
+- `soak.sh`: 노드당 캐시 2MB(교체가 계속), 검증 주기 5초(조건부 GET이 계속)로 HIT·MISS·FORWARD·교체·재검증을
+  섞는다. 결과는 `results/soak_날짜_시각.csv`. RSS는 참고로만 본다: free한 메모리도 glibc malloc이 다음을 위해
+  쥐고 있어서(`memory.heap_system`) 사용 중인 힙이 그대로여도 RSS는 천천히 늘 수 있다.
+- `/__stats`에 `memory`가 추가됐다: `heap_in_use`(malloc으로 받아 아직 free하지 않은 바이트),
+  `heap_system`(할당기가 운영체제에서 받아 둔 바이트). glibc `mallinfo2()` 값이며 asan·tsan 빌드에서는 0.
+- `memcheck.sh`: 노드 2개 중 node1만 Valgrind 위에서 실행하고 일반 요청, 특수 요청(403·400·502·501, 멈춘 연결),
+  담당 노드 장애(2순위 대체)를 거친 뒤 SIGTERM으로 정상 종료시킨다. 보고서는 `results/memcheck_날짜_시각.log`.
 
 ## 개발 환경
 
