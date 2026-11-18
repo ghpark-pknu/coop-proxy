@@ -8,6 +8,7 @@
 #  make hello           환경 검증용 서버 → build/debug/hello_server
 #  make rtest           랑데부 해싱 단위 테스트 → build/debug/rendezvous_test
 #  make ctest           캐시(샤딩) 단위 테스트·벤치마크 → build/debug/cache_test
+#  make loadc           C 부하 도구 (6단계 처리량 측정) → build/debug/loadc  (측정은 MODE=release)
 #  make clean           build/ 폴더 전체 삭제
 #
 #  주의: 명령 줄(레시피)의 들여쓰기는 반드시 "탭" 문자여야 한다.
@@ -47,10 +48,10 @@ BUILD   := build/$(MODE)
 SRCS    := $(wildcard src/*.c)
 OBJS    := $(SRCS:src/%.c=$(BUILD)/%.o)
 DEPS    := $(OBJS:.o=.d) $(BUILD)/hello_server.d $(BUILD)/tests/rendezvous_test.d \
-           $(BUILD)/tests/cache_test.d
+           $(BUILD)/tests/cache_test.d $(BUILD)/loadc.d
 TARGET  := $(BUILD)/proxy
 
-.PHONY: all hello rtest ctest clean
+.PHONY: all hello rtest ctest loadc clean
 
 ifeq ($(SRCS),)
 all:
@@ -87,6 +88,12 @@ $(BUILD)/cache_test: $(BUILD)/tests/cache_test.o $(BUILD)/cache.o
 
 $(BUILD)/tests/%.o: tests/%.c | $(BUILD)/tests
 	$(CC) $(CFLAGS) -c -o $@ $<
+
+# C 부하 도구: 프록시 코드와 별개인 한 파일 프로그램 (Zipf 계산에 -lm)
+loadc: $(BUILD)/loadc
+
+$(BUILD)/loadc: tools/loadc.c | $(BUILD)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $< $(LDLIBS) -lm
 
 # 결과물 폴더가 없으면 만든다 (| 뒤는 "순서만 보장하는" 재료)
 $(BUILD):

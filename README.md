@@ -30,6 +30,7 @@ coop-proxy/
 | `make hello` | 환경 검증용 서버 | `build/debug/hello_server` |
 | `make rtest` | 랑데부 해싱 단위 테스트 | `build/debug/rendezvous_test` |
 | `make ctest` | 캐시(샤딩) 단위 테스트·마이크로 벤치마크 | `build/debug/cache_test` |
+| `make MODE=release loadc` | C 부하 도구 (처리량 측정) | `build/release/loadc` |
 | `make clean` | 빌드 결과물 삭제 | |
 
 ## 실행
@@ -44,6 +45,7 @@ curl -i -x http://127.0.0.1:8080 http://127.0.0.1:9000/page.html   # 터미널 C
 ./scripts/test_stage3.sh                        # 3단계(클러스터) 자동 점검
 ./scripts/test_stage4.sh                        # 4단계(관제·부하 생성기) 자동 점검
 ./scripts/test_stage5.sh                        # 5단계(락 전략: 전역 mutex / 샤딩) 자동 점검
+./scripts/test_stage6.sh                        # 6단계 측정 도구(loadc) 점검
 ```
 
 > 코드를 통째로 다른 시점으로 바꾼 뒤(`git reset`, 다른 커밋 `checkout`, 압축 덮어쓰기)에는
@@ -120,6 +122,23 @@ make MODE=release ctest && ./build/release/cache_test bench          # 네트워
 - `/__stats`의 `locks`: 락을 잡은 횟수(`acquires`), 그중 다른 스레드가 잡고 있어 기다린 횟수(`contended`),
   기다린 시간 합(`wait_us`). `cache`는 모든 샤드의 합, `stats`는 요청마다 한 번 잡는 통계 락.
   `cache`에는 `shards`, `shard_objects`, `shard_bytes`(샤드별 객체 수·바이트)가 추가된다.
+
+### 고부하 측정과 락 전략 실험 (6단계)
+
+```bash
+make MODE=release all loadc
+./build/release/loadc -x 127.0.0.1:8080 -c 32 -d 10 -w 2 --prefill --pid $(pgrep -f "proxy -p 8080")
+QUICK=1 ./scripts/exp_lock.sh                   # 빠른 확인 (약 30초)
+./scripts/exp_lock.sh                           # 본 실험: 샤드 1·2·4·8·16 × 동시 1~64, 반복 3번 (약 25분)
+python3 tools/lock_summary.py results/lock_*.csv   # 결과 CSV를 다시 표로
+```
+
+- `loadc`: 스레드 N개가 "연결 → 요청 → 응답 끝까지 받기 → 닫기"를 쉬지 않고 반복한다 (닫힌 루프).
+  응답 시간 백분위, 결과(X-Cache)별 개수, 부하 도구와 프록시(`--pid`)의 CPU 사용량,
+  요청 하나에 쓴 프록시 CPU 시간을 낸다. 응답 내용 검증은 `loadgen.py`의 몫이다.
+- `exp_lock.sh`: 물리 코어를 반으로 나눠 프록시와 부하 도구를 따로 묶는다 (`taskset`).
+  1KB 객체 200개를 미리 캐시에 넣고 HIT만 재므로 "요청 처리 + 캐시 락"만 남는다.
+  결과는 `results/lock_날짜_시각.csv`와 실험 환경 `.env`.
 
 ## 개발 환경
 
