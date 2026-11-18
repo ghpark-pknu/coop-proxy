@@ -7,6 +7,7 @@
 #  make MODE=release    성능 측정용      → build/release/proxy
 #  make hello           환경 검증용 서버 → build/debug/hello_server
 #  make rtest           랑데부 해싱 단위 테스트 → build/debug/rendezvous_test
+#  make ctest           캐시(샤딩) 단위 테스트·벤치마크 → build/debug/cache_test
 #  make clean           build/ 폴더 전체 삭제
 #
 #  주의: 명령 줄(레시피)의 들여쓰기는 반드시 "탭" 문자여야 한다.
@@ -45,10 +46,11 @@ endif
 BUILD   := build/$(MODE)
 SRCS    := $(wildcard src/*.c)
 OBJS    := $(SRCS:src/%.c=$(BUILD)/%.o)
-DEPS    := $(OBJS:.o=.d) $(BUILD)/hello_server.d $(BUILD)/tests/rendezvous_test.d
+DEPS    := $(OBJS:.o=.d) $(BUILD)/hello_server.d $(BUILD)/tests/rendezvous_test.d \
+           $(BUILD)/tests/cache_test.d
 TARGET  := $(BUILD)/proxy
 
-.PHONY: all hello rtest clean
+.PHONY: all hello rtest ctest clean
 
 ifeq ($(SRCS),)
 all:
@@ -76,6 +78,12 @@ rtest: $(BUILD)/rendezvous_test
 
 $(BUILD)/rendezvous_test: $(BUILD)/tests/rendezvous_test.o $(BUILD)/router.o
 	$(CC) $(LDFLAGS) -o $@ $^ $(LDLIBS)
+
+# 캐시 단위 테스트: 테스트 코드 + cache.o (네트워크 없이 캐시만 검사, 벤치마크의 Zipf 계산에 -lm)
+ctest: $(BUILD)/cache_test
+
+$(BUILD)/cache_test: $(BUILD)/tests/cache_test.o $(BUILD)/cache.o
+	$(CC) $(LDFLAGS) -o $@ $^ $(LDLIBS) -lm
 
 $(BUILD)/tests/%.o: tests/%.c | $(BUILD)/tests
 	$(CC) $(CFLAGS) -c -o $@ $<

@@ -28,6 +28,8 @@ coop-proxy/
 | `make MODE=tsan` | 데이터 경쟁 검사 | `build/tsan/proxy` |
 | `make MODE=release` | 성능 측정 | `build/release/proxy` |
 | `make hello` | 환경 검증용 서버 | `build/debug/hello_server` |
+| `make rtest` | 랑데부 해싱 단위 테스트 | `build/debug/rendezvous_test` |
+| `make ctest` | 캐시(샤딩) 단위 테스트·마이크로 벤치마크 | `build/debug/cache_test` |
 | `make clean` | 빌드 결과물 삭제 | |
 
 ## 실행
@@ -41,7 +43,11 @@ curl -i -x http://127.0.0.1:8080 http://127.0.0.1:9000/page.html   # 터미널 C
 ./scripts/test_stage2.sh                        # 2단계(캐시) 자동 점검
 ./scripts/test_stage3.sh                        # 3단계(클러스터) 자동 점검
 ./scripts/test_stage4.sh                        # 4단계(관제·부하 생성기) 자동 점검
+./scripts/test_stage5.sh                        # 5단계(락 전략: 전역 mutex / 샤딩) 자동 점검
 ```
+
+> 코드를 통째로 다른 시점으로 바꾼 뒤(`git reset`, 다른 커밋 `checkout`, 압축 덮어쓰기)에는
+> `make clean`부터 한다. make는 파일 수정 시각으로만 판단하므로, 옛 `.o`가 남아 섞일 수 있다.
 
 ### 클러스터 (미니 CDN)
 
@@ -63,6 +69,7 @@ make rtest && ./build/debug/rendezvous_test     # 랑데부 해싱 단위 테스
 | `-t MS` | 송수신 제한 시간 | 5000 |
 | `-s SIZE` | 캐시 용량 (예: 64M, 0이면 캐시 끔) | 64M |
 | `-o SIZE` | 객체 하나의 상한 | 1M |
+| `-S N` | 캐시 샤드 수 1~64 (1 = 전역 mutex, 2 이상 = 샤드마다 mutex) | 1 |
 | `-v SEC` | 검증 주기 | 60 |
 | `-b FILE` | 차단 목록 | 없음 |
 | `-C FILE` | 노드 목록 (주면 클러스터 모드, `-n` 이름이 목록에 있어야 함) | 없음 |
@@ -91,6 +98,28 @@ CLUSTER=0 ./scripts/cluster.sh restart          # 비교 실험: 같은 요청�
 부하 생성기 주요 옵션: `-n` 요청 수 / `-d` 시간(초) / `-c` 동시 연결 / `--rate` 초당 상한 /
 `--zipf` 지수(기본 0.8) / `--seed` 시드(같으면 같은 요청열) / `--warmup` 예열 /
 `--stats` 노드 통계 확인 / `--csv`, `--json` 결과 저장 / `--no-retry` 진입 노드 재연결 끔.
+
+### 캐시 락 전략 (5단계)
+
+```bash
+./build/debug/proxy -p 8080 -S 8                # 캐시를 샤드 8개로: 샤드마다 mutex
+PROXY_ARGS="-S 8" ./scripts/cluster.sh start    # 클러스터 노드 모두 -S 8
+curl -s http://127.0.0.1:8080/__stats | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['cache']['shard_objects'], d['locks'])"
+make MODE=release ctest && ./build/release/cache_test bench          # 네트워크 없이 캐시만: 샤드 수별 처리량
+./build/release/cache_test bench -t 8 -d 3 -S 1,2,4,8,16,32 -z 0     # 스레드 8, 3초, 균등 분포
+```
+
+| 샤드 수 | 락 | 용량 | 교체 |
+|---|---|---|---|
+| `-S 1` (기본) | 전역 mutex 1개 | 캐시 전체 | 캐시 전체에서 LRU (2~4단계와 같음) |
+| `-S N` | 샤드마다 mutex | 샤드마다 전체의 1/N | 샤드 안에서만 LRU (근사 LRU) |
+
+- URL마다 `mix64(FNV-1a(URL)) % N`으로 샤드를 정한다 (버킷 번호와 다른 비트를 쓰기 위해 한 번 더 섞는다).
+- `-S`가 2 이상이면 샤드 하나의 용량(`-s` ÷ N)이 객체 상한(`-o`) 이상이어야 한다. 아니면 실행을 거부한다
+  (예: `-s 4M -S 8`은 샤드가 512KB라서 `-o 512K` 이하를 함께 줘야 한다).
+- `/__stats`의 `locks`: 락을 잡은 횟수(`acquires`), 그중 다른 스레드가 잡고 있어 기다린 횟수(`contended`),
+  기다린 시간 합(`wait_us`). `cache`는 모든 샤드의 합, `stats`는 요청마다 한 번 잡는 통계 락.
+  `cache`에는 `shards`, `shard_objects`, `shard_bytes`(샤드별 객체 수·바이트)가 추가된다.
 
 ## 개발 환경
 

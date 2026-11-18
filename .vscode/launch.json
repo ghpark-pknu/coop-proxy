@@ -22,6 +22,23 @@
             ]
         },
         {
+            "name": "cache_test 디버그 (캐시 단위 테스트)",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/build/debug/cache_test",
+            // 벤치마크를 디버깅하려면: ["bench", "-t", "4", "-d", "1"]
+            "args": [],
+            "cwd": "${workspaceFolder}",
+            "stopAtEntry": false,
+            "externalConsole": false,
+            "MIMode": "gdb",
+            "miDebuggerPath": "/usr/bin/gdb",
+            "preLaunchTask": "build: ctest",
+            "setupCommands": [
+                { "description": "변수를 보기 좋게 출력", "text": "-enable-pretty-printing", "ignoreFailures": true }
+            ]
+        },
+        {
             "name": "proxy 디버그 (클러스터 node1)",
             "type": "cppdbg",
             "request": "launch",

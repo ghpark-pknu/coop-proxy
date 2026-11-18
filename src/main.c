@@ -6,6 +6,7 @@
  *  - 리스닝 소켓 → accept → 연결마다 작업 스레드 생성
  *  - 종료: 진행 중인 연결이 끝나길 기다린 뒤 통계 출력, 캐시 해제
  */
+#include "cache.h"
 #include "filter.h"
 #include "log.h"
 #include "net.h"
@@ -38,6 +39,8 @@ static void usage(const char *prog)
             "  -t MS     송수신 제한 시간, 밀리초 (기본 5000)\n"
             "  -s SIZE   캐시 용량, 예: 64M, 512K (기본 64M, 0이면 캐시 끔)\n"
             "  -o SIZE   캐시에 저장할 객체 하나의 상한 (기본 1M)\n"
+            "  -S N      캐시 샤드 수 1~64 (기본 1 = 전역 mutex 하나, 2 이상 = 샤드마다 mutex)\n"
+            "            용량은 샤드마다 1/N씩 나누며, 샤드 하나의 용량이 객체 상한 이상이어야 한다\n"
             "  -v SEC    검증 주기, 초: 저장 후 이 시간이 지나면 원서버에 확인 (기본 60)\n"
             "  -b FILE   차단 목록 파일 (예: conf/blocklist.txt)\n"
             "  -C FILE   노드 목록 파일 (예: conf/cluster.conf). 주면 클러스터 모드로 동작\n"
@@ -131,13 +134,14 @@ static int parse_args(int argc, char *argv[], struct proxy_config *cfg)
     cfg->io_timeout_ms      = 5000;
     cfg->cache_capacity     = 64 * 1024 * 1024;
     cfg->max_object         = 1024 * 1024;
+    cfg->cache_shards       = 1;
     cfg->validate_sec       = 60;
     cfg->peer_retry_ms      = 5000;
     snprintf(cfg->node, sizeof cfg->node, "node1");
 
     long long size;
     int opt;
-    while ((opt = getopt(argc, argv, "p:n:c:t:s:o:v:b:C:r:qh")) != -1) {
+    while ((opt = getopt(argc, argv, "p:n:c:t:s:o:S:v:b:C:r:qh")) != -1) {
         switch (opt) {
         case 'p':
             if ((cfg->port = parse_int(optarg, 1, 65535)) < 0) {
@@ -175,6 +179,12 @@ static int parse_args(int argc, char *argv[], struct proxy_config *cfg)
             }
             cfg->max_object = (size_t)size;
             break;
+        case 'S':
+            if ((cfg->cache_shards = parse_int(optarg, 1, CACHE_MAX_SHARDS)) < 0) {
+                fprintf(stderr, "잘못된 샤드 수: %s (1~%d)\n", optarg, CACHE_MAX_SHARDS);
+                return -1;
+            }
+            break;
         case 'v':
             if ((cfg->validate_sec = parse_int(optarg, 0, 86400)) < 0) {
                 fprintf(stderr, "잘못된 검증 주기: %s\n", optarg);
@@ -200,8 +210,36 @@ static int parse_args(int argc, char *argv[], struct proxy_config *cfg)
             return -1;
         }
     }
-    if (cfg->cache_capacity > 0 && cfg->max_object > cfg->cache_capacity)
-        cfg->max_object = cfg->cache_capacity;      /* 객체 하나가 캐시 전체보다 클 수는 없다 */
+    if (cfg->cache_capacity == 0)
+        return 0;                                   /* 캐시 끔: 용량·샤드 검사 없음 */
+
+    size_t per = cfg->cache_capacity / (size_t)cfg->cache_shards;    /* 샤드 하나의 용량 */
+    char cap[32], obj[32], per_s[32], need[32];
+    human_size(cfg->cache_capacity, cap, sizeof cap);
+    human_size(cfg->max_object, obj, sizeof obj);
+    human_size(per, per_s, sizeof per_s);
+
+    if (per == 0) {
+        fprintf(stderr, "캐시 용량(%s)이 샤드 수(%d)보다 작습니다.\n", cap, cfg->cache_shards);
+        return -2;
+    }
+    if (cfg->cache_shards == 1) {
+        /* 전역 mutex: 객체 하나가 캐시 전체보다 클 수는 없으므로 상한을 용량으로 줄인다.
+         * (2단계부터의 동작. 어차피 저장할 수 없는 크기이므로 의미가 바뀌지 않는다) */
+        if (cfg->max_object > cfg->cache_capacity)
+            cfg->max_object = cfg->cache_capacity;
+    } else if (cfg->max_object > per) {
+        /* 샤딩: 여기서 상한을 조용히 줄이면, 캐시 전체에는 들어가는 객체가 샤드 수 때문에
+         * 저장되지 않는다. 그러면 샤드 수에 따라 "저장되는 객체"가 달라져서
+         * 락 전략 비교가 공정하지 않다. 그래서 줄이지 않고 실행을 거부한다 */
+        human_size(cfg->max_object * (size_t)cfg->cache_shards, need, sizeof need);
+        fprintf(stderr,
+                "샤드 하나의 용량(%s = %s ÷ %d)이 객체 상한(%s)보다 작습니다.\n"
+                "샤드를 나누면 객체 하나는 샤드 하나에 들어가야 합니다.\n"
+                "-s를 %s 이상으로 늘리거나, -o를 %s 이하로 주세요.\n",
+                per_s, cap, cfg->cache_shards, obj, need, per_s);
+        return -2;
+    }
     return 0;
 }
 
@@ -226,10 +264,11 @@ static void *signal_thread(void *arg)
 int main(int argc, char *argv[])
 {
     struct proxy_config cfg;
-    if (parse_args(argc, argv, &cfg) < 0) {
-        usage(argv[0]);
-        return 2;
-    }
+    int pr = parse_args(argc, argv, &cfg);
+    if (pr == -1)
+        usage(argv[0]);             /* 옵션 형식 오류: 사용법을 보여 준다 */
+    if (pr < 0)
+        return 2;                   /* -2: 옵션끼리 맞지 않음 (이유는 이미 출력함) */
 
     setvbuf(stdout, NULL, _IOLBF, 0);   /* 기록을 파일로 돌려도 한 줄씩 바로 쓰이게 */
     log_init(cfg.node, cfg.quiet);
@@ -304,6 +343,14 @@ int main(int argc, char *argv[])
         human_size(cfg.cache_capacity, cap, sizeof cap);
         human_size(cfg.max_object, obj, sizeof obj);
         log_info("캐시 용량 %s, 객체 상한 %s, 검증 주기 %d초", cap, obj, cfg.validate_sec);
+        if (cfg.cache_shards == 1) {
+            log_info("캐시 락: 전역 mutex 1개 (-S 1)");
+        } else {
+            char per[32];
+            human_size(cfg.cache_capacity / (size_t)cfg.cache_shards, per, sizeof per);
+            log_info("캐시 락: 샤드 %d개, 샤드마다 mutex (샤드 용량 %s, 교체는 샤드 안에서)",
+                     cfg.cache_shards, per);
+        }
     } else {
         log_info("캐시 끔 (모든 요청을 원서버로 중계)");
     }

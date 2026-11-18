@@ -1,7 +1,7 @@
 /*
  * proxy.c — 요청 하나의 처리 흐름
  *
- * 계획서의 흐름도 (3단계까지 구현)
+ * 계획서의 흐름도 (⑥의 캐시는 5단계부터 샤드 N개: cache.h 참고)
  *   ① 요청 수신·파싱 ─────────────── 실패 → 400
  *   ② 관제 요청(/__stats, /__dashboard)? ─ 관제 응답 (control.c), 통계·기록에는 넣지 않음
  *   ③ GET이 아님 (CONNECT 포함) ───── 501
@@ -53,7 +53,7 @@ int proxy_init(const struct proxy_config *cfg)
     g_cfg = *cfg;
     g_start_us = net_now_us();
     if (cfg->cache_capacity > 0) {
-        g_cache = cache_create(cfg->cache_capacity, cfg->max_object);
+        g_cache = cache_create(cfg->cache_capacity, cfg->max_object, cfg->cache_shards);
         if (g_cache == NULL)
             return -1;
     }
@@ -66,6 +66,8 @@ int  proxy_active_conns(void) { return atomic_load(&g_active); }
 
 const struct proxy_config *proxy_config(void) { return &g_cfg; }
 long long proxy_uptime_ms(void) { return (net_now_us() - g_start_us) / 1000; }
+
+struct cache *proxy_cache(void) { return g_cache; }
 
 int proxy_cache_usage(struct cache_usage *u)
 {
@@ -581,6 +583,20 @@ static void fmt_size(size_t b, char *out, size_t cap)
         snprintf(out, cap, "%.1fKB", (double)b / 1024.0);
 }
 
+/* 락 경합 요약 한 줄. 예: "락: 캐시(샤드 8개) | 획득 120000회, 경합 310회 (0.26%), 대기 합 4.2ms" */
+static void log_lock(const char *name, int shards, const struct lock_stats *ls)
+{
+    char what[64];
+    if (shards > 1)
+        snprintf(what, sizeof what, "%s(샤드 %d개)", name, shards);
+    else
+        snprintf(what, sizeof what, "%s(mutex 1개)", name);
+    log_info("%s | 획득 %lu회, 경합 %lu회 (%.2f%%), 대기 합 %.1fms",
+             what, ls->acquires, ls->contended,
+             ls->acquires ? 100.0 * (double)ls->contended / (double)ls->acquires : 0.0,
+             (double)ls->wait_ns / 1e6);
+}
+
 void proxy_report(void)
 {
     struct stats_snapshot s;
@@ -606,7 +622,9 @@ void proxy_report(void)
         fmt_size(u.bytes, used, sizeof used);
         fmt_size(u.capacity, cap, sizeof cap);
         log_info("캐시: 객체 %zu개, %s / %s 사용, LRU 교체 %lu회", u.count, used, cap, u.evictions);
+        log_lock("락: 캐시", u.shards, &u.lock);
     }
+    log_lock("락: 통계", 1, &s.lock);
 }
 
 void proxy_cleanup(void)

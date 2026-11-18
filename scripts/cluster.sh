@@ -12,7 +12,7 @@
 #   MODE=debug|release|tsan|asan   빌드 모드 (기본 debug)
 #   CLUSTER=0                      노드 목록 없이 독립 프록시로 실행 (클러스터와 비교하는 실험용)
 #   CONF=conf/cluster.conf         노드 목록 파일
-#   PROXY_ARGS="-s 32M -q"         모든 노드에 덧붙일 프록시 옵션
+#   PROXY_ARGS="-s 32M -q"         모든 노드에 덧붙일 프록시 옵션 (예: "-S 8" 캐시 샤드 8개)
 #   ORIGIN_PORT=9000               원서버 포트
 #   ORIGIN_DELAY=0                 원서버 응답 지연(초)
 #
@@ -116,7 +116,7 @@ stop_one() {
     rm -f "$RUNDIR/$name.pid"
     echo "  ✓ $name 종료"
     if [ "$name" != origin ]; then
-        grep -E '\] (통계|클러스터|캐시):' "$LOGDIR/$name.log" | tail -4 | sed 's/^.*\] /      /'
+        grep -E '\] (통계|클러스터|캐시|락):' "$LOGDIR/$name.log" | tail -6 | sed 's/^.*\] /      /'
     fi
 }
 

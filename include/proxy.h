@@ -15,6 +15,7 @@ struct proxy_config {
     int    quiet;                 /* 1이면 요청 기록을 출력하지 않음 (부하 실험용) */
     size_t cache_capacity;        /* 캐시 전체 용량(바이트). 0이면 캐시를 쓰지 않음 */
     size_t max_object;            /* 캐시에 저장할 객체 하나의 상한(바이트) */
+    int    cache_shards;          /* 캐시 샤드 수: 1 = 전역 mutex, 2 이상 = 샤드마다 mutex */
     int    validate_sec;          /* 검증 주기: 저장 후 이 시간이 지나면 원서버에 확인 */
     char   blocklist[256];        /* 차단 목록 파일 경로 (없으면 빈 문자열) */
     char   cluster_conf[256];     /* 노드 목록 파일 경로 (없으면 독립 프록시) */
@@ -49,6 +50,8 @@ struct cache_usage;
 const struct proxy_config *proxy_config(void);       /* 실행 설정 (읽기 전용) */
 long long proxy_uptime_ms(void);                     /* 시작 후 지난 시간 */
 int  proxy_cache_usage(struct cache_usage *u);       /* 캐시를 쓰면 1과 사용량, 끄면 0 */
+struct cache;
+struct cache *proxy_cache(void);                     /* 캐시 (끄면 NULL). 샤드별 조회용 */
 
 /* 캐시 해제. 진행 중인 연결이 없을 때만 호출해야 한다 */
 void proxy_cleanup(void);

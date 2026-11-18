@@ -32,6 +32,13 @@
             "problemMatcher": "$gcc"
         },
         {
+            "label": "build: ctest",
+            "type": "shell",
+            "command": "make ctest MODE=debug",
+            "group": "build",
+            "problemMatcher": "$gcc"
+        },
+        {
             "label": "build: hello",
             "type": "shell",
             "command": "make hello MODE=debug",

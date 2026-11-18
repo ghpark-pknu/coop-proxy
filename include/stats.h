@@ -14,6 +14,8 @@
 #ifndef STATS_H
 #define STATS_H
 
+#include "lockstat.h"
+
 /* 요청 하나의 처리 결과 분류 */
 enum outcome {
     OUT_HIT,        /* 캐시에서 바로 응답 */
@@ -62,6 +64,7 @@ struct stats_snapshot {
     unsigned long long   bytes;             /* 보낸 바이트 합 */
     struct latency_stats client;            /* 클라이언트가 직접 보낸 요청 */
     struct latency_stats peer;              /* 다른 노드가 넘겨준 요청 */
+    struct lock_stats    lock;              /* 통계 락의 경합 기록 (stats_record만 센다) */
 };
 
 const char *outcome_name(enum outcome o);

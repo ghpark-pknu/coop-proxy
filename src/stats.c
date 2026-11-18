@@ -39,7 +39,9 @@ void stats_record(const struct stats_event *e)
 {
     int bucket = stats_bucket(e->us);       /* 계산은 락 밖에서 → 락을 잡는 시간이 짧아진다 */
 
-    pthread_mutex_lock(&g_lock);
+    /* 요청마다 한 번씩 잡는 전역 락이다. 캐시 락을 샤드로 나눈 뒤에도 이 락은 하나이므로,
+     * 경합을 세어 두면 병목이 캐시 락에서 통계 락으로 옮겨 가는지 확인할 수 있다 */
+    lockstat_lock(&g_lock, &g_stats.lock);
     g_stats.count[e->outcome]++;
     g_stats.requests++;
     g_stats.origin_requests += (unsigned long)e->origin_requests;

@@ -13,8 +13,11 @@
  *     "peer":   { "count": 41,  "sum_us": 12345, "max_us": 999,  "hist": [ ... ] }
  *   },
  *   "cache": { "enabled": true, "objects": 30, "bytes": 2345678, "capacity": 67108864,
- *              "max_object": 1048576, "evictions": 0 },
- *   "config": { "validate_sec": 60, "peer_retry_ms": 5000 },
+ *              "max_object": 1048576, "evictions": 0, "shards": 4,
+ *              "shard_objects": [8, 7, 9, 6], "shard_bytes": [...] },          ← 5단계
+ *   "locks": { "cache": { "acquires": 9120, "contended": 12, "wait_us": 340 },   ← 5단계
+ *              "stats": { "acquires": 4560, "contended": 3, "wait_us": 41 } },
+ *   "config": { "validate_sec": 60, "peer_retry_ms": 5000, "cache_shards": 4 },
  *   "cluster": [ { "name": "node1", "host": "127.0.0.1", "port": 8081, "self": true, "available": true }, ... ]
  * }
  */
@@ -124,6 +127,13 @@ static void jlatency(struct jbuf *b, const char *name, const struct latency_stat
     jprintf(b, "]}");
 }
 
+/* "이름":{"acquires":획득, "contended":경합, "wait_us":기다린 시간 합(마이크로초)} */
+static void jlock(struct jbuf *b, const char *name, const struct lock_stats *ls)
+{
+    jprintf(b, "\"%s\":{\"acquires\":%lu,\"contended\":%lu,\"wait_us\":%llu}",
+            name, ls->acquires, ls->contended, ls->wait_ns / 1000ULL);
+}
+
 static void send_stats(int cfd)
 {
     const struct proxy_config *cfg = proxy_config();
@@ -162,16 +172,37 @@ static void send_stats(int cfd)
     jlatency(b, "peer", &s.peer);
     jprintf(b, "}");
 
-    if (cache_on)
+    if (cache_on) {
         jprintf(b, ",\"cache\":{\"enabled\":true,\"objects\":%zu,\"bytes\":%zu,\"capacity\":%zu,"
-                   "\"max_object\":%zu,\"evictions\":%lu}",
-                u.count, u.bytes, u.capacity, cfg->max_object, u.evictions);
-    else
+                   "\"max_object\":%zu,\"evictions\":%lu,\"shards\":%d",
+                u.count, u.bytes, u.capacity, cfg->max_object, u.evictions, u.shards);
+        /* 샤드별 객체 수·바이트: URL이 샤드에 고르게 퍼지는지 확인용 */
+        struct cache *c = proxy_cache();
+        struct cache_usage su[CACHE_MAX_SHARDS];
+        for (int i = 0; i < u.shards; i++)
+            cache_get_shard_usage(c, i, &su[i]);
+        jprintf(b, ",\"shard_objects\":[");
+        for (int i = 0; i < u.shards; i++)
+            jprintf(b, "%s%zu", i ? "," : "", su[i].count);
+        jprintf(b, "],\"shard_bytes\":[");
+        for (int i = 0; i < u.shards; i++)
+            jprintf(b, "%s%zu", i ? "," : "", su[i].bytes);
+        jprintf(b, "]}");
+    } else {
         jprintf(b, ",\"cache\":{\"enabled\":false,\"objects\":0,\"bytes\":0,\"capacity\":0,"
-                   "\"max_object\":0,\"evictions\":0}");
+                   "\"max_object\":0,\"evictions\":0,\"shards\":0,\"shard_objects\":[],\"shard_bytes\":[]}");
+        memset(&u.lock, 0, sizeof u.lock);
+    }
 
-    jprintf(b, ",\"config\":{\"validate_sec\":%d,\"peer_retry_ms\":%d}",
-            cfg->validate_sec, cfg->peer_retry_ms);
+    /* 락 경합 (누적). 캐시: 모든 샤드의 합 / 통계: 요청마다 한 번 잡는 전역 락 */
+    jprintf(b, ",\"locks\":{");
+    jlock(b, "cache", &u.lock);
+    jprintf(b, ",");
+    jlock(b, "stats", &s.lock);
+    jprintf(b, "}");
+
+    jprintf(b, ",\"config\":{\"validate_sec\":%d,\"peer_retry_ms\":%d,\"cache_shards\":%d}",
+            cfg->validate_sec, cfg->peer_retry_ms, cfg->cache_capacity > 0 ? cfg->cache_shards : 0);
 
     jprintf(b, ",\"cluster\":[");
     long long now = net_now_ms();
