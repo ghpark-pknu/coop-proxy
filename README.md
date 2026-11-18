@@ -46,6 +46,7 @@ curl -i -x http://127.0.0.1:8080 http://127.0.0.1:9000/page.html   # 터미널 C
 ./scripts/test_stage4.sh                        # 4단계(관제·부하 생성기) 자동 점검
 ./scripts/test_stage5.sh                        # 5단계(락 전략: 전역 mutex / 샤딩) 자동 점검
 ./scripts/test_stage6.sh                        # 6단계 측정 도구(loadc) 점검
+./scripts/test_stage7.sh                        # 7단계 실험 분석 도구 점검 (실험 스크립트를 아주 작게 실제로 돌림)
 ```
 
 > 코드를 통째로 다른 시점으로 바꾼 뒤(`git reset`, 다른 커밋 `checkout`, 압축 덮어쓰기)에는
@@ -139,6 +140,27 @@ python3 tools/lock_summary.py results/lock_*.csv   # 결과 CSV를 다시 표로
 - `exp_lock.sh`: 물리 코어를 반으로 나눠 프록시와 부하 도구를 따로 묶는다 (`taskset`).
   1KB 객체 200개를 미리 캐시에 넣고 HIT만 재므로 "요청 처리 + 캐시 락"만 남는다.
   결과는 `results/lock_날짜_시각.csv`와 실험 환경 `.env`.
+
+### 실험 분석과 그래프 (7단계)
+
+```bash
+./scripts/exp_lock.sh                                   # 실험 ①: 락 전략 (메인 스레드 CPU, 같은 CPU의 자료구조 벤치마크 포함)
+SHARDS="1 2 4 16" CONCS="8 16 32 64" REPEAT=7 DUR=15 ./scripts/exp_lock.sh   # 정밀 측정: 조건을 줄이고 반복을 늘림
+python3 tools/lock_summary.py results/lock_X.csv        # 표 ①~⑪ (6단계 형식 CSV도 읽음)
+python3 tools/plot_results.py lock results/lock_X.csv   # 그림 → results/lock_X_figs/
+
+QUICK=1 ./scripts/exp_cluster.sh                        # 실험 ②: 독립 프록시 3개 대 클러스터 3노드 (빠른 확인)
+./scripts/exp_cluster.sh                                # 본 실험: 노드당 512K~16M, 원서버 지연 50ms (약 10분)
+python3 tools/cluster_summary.py results/cluster_X.csv
+python3 tools/plot_results.py cluster results/cluster_X.csv
+```
+
+| 도구 | 하는 일 |
+|---|---|
+| `tools/lock_summary.py` | 반복의 중앙값으로 표: 처리량과 흩어짐, 배율, 경합률, **경합률 감소의 예측 Σ(샤드별 요청 몫)² 대 관측**, 요청당 락 대기 시간, 메인(accept) 스레드 CPU, 자료구조 배율 대 프록시 전체 배율 |
+| `tools/cluster_summary.py` | 노드당 용량별 히트율, 원서버 요청(1000개당), 평균·p50·p99, HIT만의 응답 시간(다른 노드를 거치는 비용), 캐시 객체 수 |
+| `tools/plot_results.py` | 보고서용 PNG. 한글 글꼴이 없으면 Windows의 맑은 고딕을 WSL에서 불러오고, 그래도 없으면 `sudo apt install fonts-nanum` 안내 |
+| `tools/exp_common.py` | 위 도구들이 함께 쓰는 함수: 결과 파일 읽기, 프록시와 같은 해시(FNV-1a, mix64)로 샤드 계산 |
 
 ## 개발 환경
 

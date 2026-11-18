@@ -16,9 +16,13 @@
 #   release 빌드, 1KB 객체 200개(~/coop-data/www-small), 캐시 64MB(교체 없음), 검증 주기 600초,
 #   부하 도구가 측정 전에 모든 객체를 한 번씩 요청 → 측정 구간은 모두 HIT (원서버·디스크가 끼지 않음)
 #   반복은 바깥 고리: 반복 1회 안에서 모든 샤드 수를 돌고 다음 반복으로 → 노트북의 온도·터보 변화가
-#   특정 샤드 수에만 몰리지 않게 한다. 샤드 수마다 프록시를 새로 띄운다.
+#   특정 샤드 수에만 몰리지 않게 한다. 짝수 번째 반복은 샤드 순서를 거꾸로 돈다 (1→16, 16→1, ...):
+#   "늘 먼저 재는 샤드 수"가 생기지 않게. 샤드 수마다 프록시를 새로 띄운다.
+#   시작 전에 같은 프록시 CPU에서 캐시 마이크로 벤치마크(cache_test bench)를 같은 URL로 돌려
+#   "자료구조만 쟀을 때"와 "프록시 전체"를 나란히 비교할 수 있게 한다 (SKIP_BENCH=1이면 생략).
 #
-# 결과: results/lock_날짜_시각.csv (측정 1회 = 한 줄), results/lock_날짜_시각.env (실험 환경)
+# 결과: results/lock_날짜_시각.csv (측정 1회 = 한 줄), results/lock_날짜_시각.env (실험 환경),
+#       results/lock_날짜_시각_bench.csv (마이크로 벤치마크)
 #       마지막에 반복의 중앙값으로 요약 표를 출력한다. 표만 다시 보려면:
 #       python3 tools/lock_summary.py results/lock_날짜_시각.csv
 set -u
@@ -85,7 +89,7 @@ print(n)" "$1"; }
 
 # ---------------------------------------------------------------- 준비
 echo "[준비] release 빌드"
-make -s MODE=release all loadc || { echo "빌드 실패"; exit 1; }
+make -s MODE=release all loadc ctest || { echo "빌드 실패"; exit 1; }
 BIN=build/release/proxy
 LC=build/release/loadc
 if [ ! -f "$SMALL/manifest.json" ]; then
@@ -96,6 +100,7 @@ mkdir -p results "$LOGDIR"
 STAMP=$(date +%Y%m%d_%H%M%S)
 CSV="results/lock_$STAMP.csv"
 ENVF="results/lock_$STAMP.env"
+BENCH="results/lock_${STAMP}_bench.csv"
 TMP=$(mktemp -d)
 ORIGIN_PID=""
 PP=""
@@ -114,11 +119,12 @@ wait_port() {
     echo "포트 $1 이 열리지 않았습니다 ($LOGDIR/exp_lock_*.log 확인)"
     exit 1
 }
-lockstat() {    # 프록시의 락 누적값: 캐시 획득 경합 대기us 통계획득 통계경합
+lockstat() {    # 프록시의 락 누적값: 캐시 획득 경합 대기us 통계획득 통계경합 통계대기us
     curl -s "http://127.0.0.1:$PROXY_PORT/__stats" | python3 -c "
 import json, sys
 d = json.load(sys.stdin)['locks']
-print(d['cache']['acquires'], d['cache']['contended'], d['cache']['wait_us'], d['stats']['acquires'], d['stats']['contended'])"
+print(d['cache']['acquires'], d['cache']['contended'], d['cache']['wait_us'],
+      d['stats']['acquires'], d['stats']['contended'], d['stats']['wait_us'])"
 }
 
 NP=$(ncpus_of "$PROXY_CPUS"); NL=$(ncpus_of "$LOAD_CPUS")
@@ -132,26 +138,37 @@ runs=$(( REPEAT * $(wc -w <<< "$SHARDS") * $(wc -w <<< "$CONCS") ))
     echo "proxy_cpus=${PROXY_CPUS:-전체} load_cpus=${LOAD_CPUS:-전체}"
     echo "shards=$SHARDS concs=$CONCS repeat=$REPEAT dur=$DUR warm=$WARM zipf=$ZIPF keys=$KEYS"
     echo "proxy_args=-q -v 600 -s 64M -S <샤드 수>   objects=$SMALL (1KB × $KEYS)"
+    echo "origin=127.0.0.1:$ORIGIN_PORT"
 } > "$ENVF"
 
-echo "rep,shards,conc,rps,mean_ms,p50_ms,p90_ms,p99_ms,failed,loader_cores,proxy_cores,proxy_us_per_req,cache_acquires,cache_contended,cache_contended_pct,cache_wait_us,stats_acquires,stats_contended,stats_contended_pct" > "$CSV"
+# 앞 19열은 6단계 형식 그대로 두고 7단계 열을 뒤에 붙인다 (옛 결과 파일도 같은 요약·그래프 도구로 읽히게)
+echo "rep,shards,conc,rps,mean_ms,p50_ms,p90_ms,p99_ms,failed,loader_cores,proxy_cores,proxy_us_per_req,cache_acquires,cache_contended,cache_contended_pct,cache_wait_us,stats_acquires,stats_contended,stats_contended_pct,main_cores,main_us_per_req,stats_wait_us" > "$CSV"
 
 echo "[준비] 프록시 CPU ${PROXY_CPUS:-전체} (${NP}개) / 부하 도구·원서버 CPU ${LOAD_CPUS:-전체} (${NL}개)"
-echo "[준비] 측정 ${runs}회 × (예열 ${WARM}초 + 측정 ${DUR}초) ≈ $(( runs * (WARM + DUR + 1) / 60 + 1 ))분"
+echo "[준비] 측정 ${runs}회 × (예열 ${WARM}초 + 측정 ${DUR}초) ≈ $(python3 -c "print(int($runs * ($WARM + $DUR + 1) / 60) + 1)")분"
 for p in $ORIGIN_PORT $PROXY_PORT; do
     if nc -z 127.0.0.1 "$p" 2>/dev/null; then
         echo "포트 $p 를 이미 다른 프로그램이 쓰고 있습니다 (ss -ltnp | grep $p 로 확인 후 종료하세요)"
         exit 1
     fi
 done
+if [ "${SKIP_BENCH:-0}" != 1 ]; then
+    echo "[준비] 같은 프록시 CPU(${NP}개)에서 캐시 마이크로 벤치마크: 스레드 ${NP}개, 샤드 $SHARDS"
+    pin "$PROXY_CPUS" build/release/cache_test bench -t "$NP" -d 2 -k "$KEYS" -z "$ZIPF" \
+        -S "$(tr ' ' ',' <<< "$SHARDS")" --prefix "http://127.0.0.1:$ORIGIN_PORT/obj/" --csv "$BENCH" \
+        | sed -n '/샤드  처리량/,/^$/p' | sed 's/^/  /'
+fi
 pin_bg "$LOAD_CPUS" "$LOGDIR/exp_lock_origin.log" python3 tools/origin.py --port $ORIGIN_PORT --dir "$SMALL" --quiet
 ORIGIN_PID=$BG_PID
 wait_port $ORIGIN_PORT
 
 # ---------------------------------------------------------------- 측정
 i=0
+REVERSED=$(tr ' ' '\n' <<< "$SHARDS" | grep -v '^$' | tac | tr '\n' ' ')
 for rep in $(seq 1 "$REPEAT"); do
-    for s in $SHARDS; do
+    order=$SHARDS
+    [ $((rep % 2)) -eq 0 ] && order=$REVERSED       # 짝수 번째 반복은 거꾸로
+    for s in $order; do
         if nc -z 127.0.0.1 $PROXY_PORT 2>/dev/null; then
             echo "포트 $PROXY_PORT 가 아직 열려 있습니다 (앞 프록시가 끝나지 않음)"; exit 1
         fi
@@ -165,32 +182,33 @@ for rep in $(seq 1 "$REPEAT"); do
         fi
         for c in $CONCS; do
             i=$((i + 1))
-            read -r a0 c0 w0 sa0 sc0 < <(lockstat)
+            read -r a0 c0 w0 sa0 sc0 sw0 < <(lockstat)
             pin "$LOAD_CPUS" "$LC" -x 127.0.0.1:$PROXY_PORT -o 127.0.0.1:$ORIGIN_PORT -k "$KEYS" -z "$ZIPF" \
                 -c "$c" -d "$DUR" -w "$WARM" --prefill --pid "$PP" -q --json "$TMP/r.json" > "$TMP/r.txt" 2>&1
             rc=$?
-            read -r a1 c1 w1 sa1 sc1 < <(lockstat)
+            read -r a1 c1 w1 sa1 sc1 sw1 < <(lockstat)
             if [ $rc -eq 2 ] || [ ! -s "$TMP/r.json" ]; then
                 echo "  측정 실패 (샤드 $s, 동시 $c):"; sed 's/^/    /' "$TMP/r.txt"; exit 1
             fi
-            row=$(python3 - "$TMP/r.json" "$rep" "$s" "$c" "$a0" "$c0" "$w0" "$sa0" "$sc0" "$a1" "$c1" "$w1" "$sa1" "$sc1" <<'EOF'
+            row=$(python3 - "$TMP/r.json" "$rep" "$s" "$c" "$a0" "$c0" "$w0" "$sa0" "$sc0" "$sw0" "$a1" "$c1" "$w1" "$sa1" "$sc1" "$sw1" <<'EOF'
 import json, sys
 d = json.load(open(sys.argv[1]))["result"]
 rep, s, c = sys.argv[2:5]
-a0, c0, w0, sa0, sc0, a1, c1, w1, sa1, sc1 = map(int, sys.argv[5:15])
+a0, c0, w0, sa0, sc0, sw0, a1, c1, w1, sa1, sc1, sw1 = map(int, sys.argv[5:17])
 ca, cc, sa, sc = a1 - a0, c1 - c0, sa1 - sa0, sc1 - sc0
 L, cpu = d["latency_ms"], d["cpu"]
 f = lambda v: "" if v is None else f"{v:.4f}"
 print(",".join([rep, s, c, f"{d['rps']:.1f}", f(L["mean"]), f(L["p50"]), f(L["p90"]), f(L["p99"]),
                 str(d["failed"]), f(cpu["loader_cores"]), f(cpu["proxy_cores"]), f(cpu["proxy_us_per_req"]),
                 str(ca), str(cc), f"{100 * cc / ca:.3f}" if ca else "0", str(w1 - w0),
-                str(sa), str(sc), f"{100 * sc / sa:.3f}" if sa else "0"]))
+                str(sa), str(sc), f"{100 * sc / sa:.3f}" if sa else "0",
+                f(cpu.get("proxy_main_cores")), f(cpu.get("proxy_main_us_per_req")), str(sw1 - sw0)]))
 EOF
 )
             echo "$row" >> "$CSV"
-            IFS=, read -r _ _ _ rps _ _ _ p99 failed lcores pcores pus _ _ cpct _ _ _ spct <<< "$row"
-            printf '  [%3d/%d] 반복 %d  샤드 %2d  동시 %2d → %9.0f 요청/s  p99 %6.3fms  프록시 %.2f코어(요청당 %.1fus)  부하 도구 %.2f코어  경합 캐시 %s%% 통계 %s%%%s\n' \
-                   "$i" "$runs" "$rep" "$s" "$c" "$rps" "$p99" "$pcores" "$pus" "$lcores" "$cpct" "$spct" \
+            IFS=, read -r _ _ _ rps _ _ _ p99 failed lcores pcores pus _ _ cpct _ _ _ spct mcores _ _ <<< "$row"
+            printf '  [%3d/%d] 반복 %d  샤드 %2d  동시 %2d → %9.0f 요청/s  p99 %6.3fms  프록시 %.2f코어(요청당 %.1fus, 메인 스레드 %.2f)  부하 도구 %.2f코어  경합 캐시 %s%% 통계 %s%%%s\n' \
+                   "$i" "$runs" "$rep" "$s" "$c" "$rps" "$p99" "$pcores" "$pus" "${mcores:-0}" "$lcores" "$cpct" "$spct" \
                    "$([ "$failed" != 0 ] && echo "  ※ 실패 $failed")"
         done
         kill -TERM "$PP"
@@ -203,4 +221,7 @@ done
 echo
 echo "결과 파일: $CSV"
 echo "실험 환경: $ENVF"
+[ -s "$BENCH" ] && echo "마이크로 벤치마크: $BENCH"
 python3 tools/lock_summary.py "$CSV" --proxy-cpus "$NP" --load-cpus "$NL"
+echo
+echo "그래프: python3 tools/plot_results.py lock $CSV"

@@ -8,10 +8,14 @@
  *       (make MODE=tsan ctest → ./build/tsan/cache_test 로 데이터 경쟁까지 검사)
  *
  *   ./build/release/cache_test bench [-t 스레드] [-d 초] [-k 키 수] [-z Zipf 지수] [-S 샤드 목록]
+ *                                    [--prefix URL앞부분] [--csv 파일]
  *       네트워크 없이 캐시만 두드려서 샤드 수별 처리량과 락 경합을 잰다.
  *       스레드마다 Zipf 분포로 URL을 골라 cache_lookup → cache_release를 반복한다
  *       (프록시의 HIT 처리와 같은 락 사용: 요청 하나에 캐시 락 2번).
  *       기본: 스레드 = CPU 수, 2초, 키 200개, Zipf 0.8, 샤드 1,2,4,8,16
+ *       키는 "URL앞부분" + 0000.bin ~ (기본 http://127.0.0.1:9000/obj/ → loadc의 기본 요청과 같은 URL).
+ *       프록시 실험과 같은 URL을 쓰면 샤드에 퍼지는 모양(1위 키 샤드 몫)까지 같아진다.
+ *       --csv: 결과를 CSV로 저장 (exp_lock.sh가 프록시 실험과 나란히 비교할 때 쓴다)
  */
 #include "cache.h"
 #include "hash.h"
@@ -424,6 +428,8 @@ static int bench(int argc, char *argv[])
     double secs = 2.0, zipf = 0.8;
     int nkeys = 200;
     char shard_list[128] = "1,2,4,8,16";
+    char prefix[64] = "http://127.0.0.1:9000/obj/";
+    const char *csv = NULL;
 
     for (int i = 0; i < argc; i++) {
         const char *v = i + 1 < argc ? argv[i + 1] : NULL;
@@ -433,6 +439,8 @@ static int bench(int argc, char *argv[])
         else if (strcmp(argv[i], "-k") == 0) nkeys = atoi(v);
         else if (strcmp(argv[i], "-z") == 0) zipf = atof(v);
         else if (strcmp(argv[i], "-S") == 0) snprintf(shard_list, sizeof shard_list, "%s", v);
+        else if (strcmp(argv[i], "--prefix") == 0) snprintf(prefix, sizeof prefix, "%s", v);
+        else if (strcmp(argv[i], "--csv") == 0) csv = v;
         else { fprintf(stderr, "알 수 없는 옵션: %s\n", argv[i]); return 2; }
         i++;
     }
@@ -466,7 +474,7 @@ static int bench(int argc, char *argv[])
 
     double total = 0;
     for (int r = 0; r < nkeys; r++) {
-        url_of(keys[r], sizeof keys[r], "obj", r);
+        snprintf(keys[r], sizeof keys[r], "%s%04d.bin", prefix, r);
         total += pow(r + 1, -zipf);         /* 순위 r+1의 가중치 1/(r+1)^s */
         cdf[r] = total;
     }
@@ -480,6 +488,15 @@ static int bench(int argc, char *argv[])
     printf("  연산 1개 = cache_lookup + cache_release (프록시 HIT 1건과 같은 락 사용: 캐시 락 2번)\n\n");
     /* 한글은 화면에서 2칸이라 printf의 폭 지정으로는 줄이 맞지 않는다 → 머리줄은 직접 맞춘다 */
     printf("    샤드  처리량(연산/s)      배율      경합률    경합당 대기    1위 키 샤드 몫\n");
+    FILE *cf = NULL;
+    if (csv != NULL) {
+        cf = fopen(csv, "w");
+        if (cf == NULL) {
+            perror(csv);
+            return 2;
+        }
+        fprintf(cf, "shards,threads,ops_per_sec,ratio,contended_pct,wait_per_cont_us,hot_share\n");
+    }
 
     double base = 0;
     for (int vi = 0; vi < nvals; vi++) {
@@ -535,10 +552,16 @@ static int bench(int argc, char *argv[])
         printf("  %6d  %14.0f  %7.2fx  %9.2f%%  %11.2fus  %15.1f%%\n",
                shards, rate, rate / base, acq ? 100.0 * (double)con / (double)acq : 0.0,
                con ? (double)wait / (double)con / 1000.0 : 0.0, 100.0 * hot);
+        if (cf != NULL)
+            fprintf(cf, "%d,%d,%.0f,%.4f,%.4f,%.4f,%.4f\n", shards, threads, rate, rate / base,
+                    acq ? 100.0 * (double)con / (double)acq : 0.0,
+                    con ? (double)wait / (double)con / 1000.0 : 0.0, hot);
         if (misses != 0)
             printf("    (주의: MISS %lu개 — 모든 키가 들어 있어야 한다)\n", misses);
         cache_destroy(c);
     }
+    if (cf != NULL)
+        fclose(cf);
     printf("\n  배율 = 첫 줄(보통 샤드 1개 = 전역 mutex) 대비 처리량\n");
     printf("  경합률 = 락을 잡으려 할 때 다른 스레드가 이미 잡고 있던 비율\n");
     printf("  1위 키 샤드 몫 = 가장 인기 있는 키가 든 샤드로 가는 요청 비율 (샤드를 늘려도 이 아래로는 안 줄어든다)\n");

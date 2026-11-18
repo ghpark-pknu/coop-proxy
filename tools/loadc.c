@@ -26,7 +26,9 @@
  *   -t MS       송수신·연결 제한 시간 (기본 5000)
  *   --prefill   측정 전에 모든 객체를 한 번씩 요청해 캐시를 채운다 (HIT만 재고 싶을 때)
  *   --seed N    난수 시드 (기본 2026)
- *   --pid LIST  측정 동안 이 프로세스들(프록시)이 쓴 CPU 시간도 잰다 (쉼표로 여러 개)
+ *   --pid LIST  측정 동안 이 프로세스들(프록시)이 쓴 CPU 시간도 잰다 (쉼표로 여러 개).
+ *               첫 번째 프로세스는 메인 스레드(연결을 받고 작업 스레드를 만드는 accept 스레드)의
+ *               CPU 시간도 따로 잰다 → 요청을 하나씩 순서대로 받는 이 스레드가 병목인지 판단
  *   --json FILE 결과를 JSON으로 저장
  *   -q          진행 표시 끔
  *
@@ -330,11 +332,15 @@ static double self_cpu_sec(void)
          + (double)ru.ru_stime.tv_sec + ru.ru_stime.tv_usec / 1e6;
 }
 
-/* /proc/PID/stat의 utime + stime (초). 프로세스가 없으면 -1 */
-static double proc_cpu_sec(int pid)
+/* /proc/PID/stat의 utime + stime (초). 프로세스가 없으면 -1.
+ * tid > 0이면 그 스레드 하나만: /proc/PID/task/TID/stat (메인 스레드의 TID = PID) */
+static double proc_cpu_sec_of(int pid, int tid)
 {
     char path[64], buf[1024];
-    snprintf(path, sizeof path, "/proc/%d/stat", pid);
+    if (tid > 0)
+        snprintf(path, sizeof path, "/proc/%d/task/%d/stat", pid, tid);
+    else
+        snprintf(path, sizeof path, "/proc/%d/stat", pid);
     FILE *fp = fopen(path, "r");
     if (fp == NULL)
         return -1;
@@ -350,6 +356,14 @@ static double proc_cpu_sec(int pid)
     if (sscanf(p + 2, "%*c %*d %*d %*d %*d %*d %*u %*u %*u %*u %*u %llu %llu", &ut, &st) != 2)
         return -1;
     return (double)(ut + st) / (double)sysconf(_SC_CLK_TCK);
+}
+
+static double proc_cpu_sec(int pid) { return proc_cpu_sec_of(pid, 0); }
+
+/* 첫 번째 --pid 프로세스의 메인 스레드 CPU 시간 (없으면 -1) */
+static double main_thread_cpu_sec(void)
+{
+    return g.npids > 0 ? proc_cpu_sec_of(g.pids[0], g.pids[0]) : -1;
 }
 
 static double pids_cpu_sec(void)
@@ -575,7 +589,7 @@ int main(int argc, char *argv[])
         }
 
     long long meas_start = start, meas_end;
-    double cpu0, pcpu0;
+    double cpu0, pcpu0, mcpu0;
     if (g.dur > 0) {
         if (g.warm > 0) {
             struct timespec ts = { (time_t)g.warm, (long)((g.warm - (double)(time_t)g.warm) * 1e9) };
@@ -585,6 +599,7 @@ int main(int argc, char *argv[])
         }
         cpu0 = self_cpu_sec();
         pcpu0 = pids_cpu_sec();
+        mcpu0 = main_thread_cpu_sec();
         long long end = meas_start + (long long)(g.dur * 1e9);
         for (;;) {
             long long left = end - now_ns();
@@ -604,11 +619,12 @@ int main(int argc, char *argv[])
     } else {
         cpu0 = self_cpu_sec();
         pcpu0 = pids_cpu_sec();
+        mcpu0 = main_thread_cpu_sec();
         for (int i = 0; i < g.conc; i++)
             pthread_join(ws[i].tid, NULL);
         meas_end = now_ns();
     }
-    double cpu1 = self_cpu_sec(), pcpu1 = pids_cpu_sec();
+    double cpu1 = self_cpu_sec(), pcpu1 = pids_cpu_sec(), mcpu1 = main_thread_cpu_sec();
     if (!g.quiet && g.dur > 0)
         fprintf(stderr, "\r%60s\r", "");
 
@@ -658,6 +674,9 @@ int main(int argc, char *argv[])
     int pid_ok = g.npids > 0 && pcpu0 >= 0 && pcpu1 >= 0;
     double proxy_cores = pid_ok && el > 0 ? (pcpu1 - pcpu0) / el : -1;
     double proxy_us_per_req = pid_ok && req > 0 ? (pcpu1 - pcpu0) * 1e6 / (double)req : -1;
+    int main_ok = pid_ok && mcpu0 >= 0 && mcpu1 >= 0;
+    double main_cores = main_ok && el > 0 ? (mcpu1 - mcpu0) / el : -1;
+    double main_us_per_req = main_ok && req > 0 ? (mcpu1 - mcpu0) * 1e6 / (double)req : -1;
     double mean = nlat ? sum_ms / (double)nlat : 0;
     double p50 = pct_ms(lat, nlat, 0.50), p90 = pct_ms(lat, nlat, 0.90);
     double p99 = pct_ms(lat, nlat, 0.99), pmax = nlat ? lat[nlat - 1] / 1000.0 : 0;
@@ -688,9 +707,12 @@ int main(int argc, char *argv[])
     printf("  CPU: 부하 도구 %.2f코어", self_cores);
     if (pid_ok)
         printf(", 프록시 %.2f코어 → 요청 하나에 프록시 CPU %.1fus", proxy_cores, proxy_us_per_req);
+    if (main_ok)
+        printf("\n       그중 메인(accept) 스레드 %.2f코어 → 요청 하나에 %.1fus", main_cores, main_us_per_req);
     else if (g.npids > 0)
         printf(", 프록시 CPU 측정 실패 (--pid 프로세스를 찾을 수 없음)");
-    printf("\n  (코어 = CPU 시간 ÷ 측정 시간. 1.00이면 CPU 하나를 꽉 채워 쓴 것)\n");
+    printf("\n  (코어 = CPU 시간 ÷ 측정 시간. 1.00이면 CPU 하나를 꽉 채워 쓴 것.\n"
+           "   메인 스레드는 혼자서 연결을 차례로 받으므로 1.00에 가까우면 그 스레드가 병목이다)\n");
 
     /* ---- JSON ---- */
     if (g.json != NULL) {
@@ -730,6 +752,10 @@ int main(int argc, char *argv[])
             fprintf(fp, ",\"proxy_cores\":%.4f,\"proxy_us_per_req\":%.3f", proxy_cores, proxy_us_per_req);
         else
             fprintf(fp, ",\"proxy_cores\":null,\"proxy_us_per_req\":null");
+        if (main_ok)
+            fprintf(fp, ",\"proxy_main_cores\":%.4f,\"proxy_main_us_per_req\":%.3f", main_cores, main_us_per_req);
+        else
+            fprintf(fp, ",\"proxy_main_cores\":null,\"proxy_main_us_per_req\":null");
         fprintf(fp, "}}}\n");
         fclose(fp);
     }
