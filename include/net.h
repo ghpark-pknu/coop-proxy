@@ -38,7 +38,9 @@ int net_write_all(int fd, const void *buf, size_t len);
 struct iovec;
 int net_writev_all(int fd, struct iovec *iov, int iovcnt);
 
-/* 경과 시간 측정용 현재 시각(ms). 시스템 시계를 바꿔도 거꾸로 가지 않는 단조 시계 */
+/* 경과 시간 측정용 현재 시각. 시스템 시계를 바꿔도 거꾸로 가지 않는 단조 시계
+ * (밀리초 / 마이크로초. 캐시 HIT는 1ms 미만이라 응답 시간은 마이크로초로 잰다) */
 long long net_now_ms(void);
+long long net_now_us(void);
 
 #endif /* NET_H */

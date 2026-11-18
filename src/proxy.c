@@ -3,7 +3,7 @@
  *
  * 계획서의 흐름도 (3단계까지 구현)
  *   ① 요청 수신·파싱 ─────────────── 실패 → 400
- *   ② 관제 요청(/__stats 등)? ─────── 4단계에서 구현 (지금은 501)
+ *   ② 관제 요청(/__stats, /__dashboard)? ─ 관제 응답 (control.c), 통계·기록에는 넣지 않음
  *   ③ GET이 아님 (CONNECT 포함) ───── 501
  *   ④ 차단 목록에 있음 ─────────────── 403
  *   ⑤ CDN 라우터: 랑데부 해싱으로 담당 노드 결정
@@ -23,6 +23,7 @@
  */
 #include "proxy.h"
 #include "cache.h"
+#include "control.h"
 #include "filter.h"
 #include "http.h"
 #include "log.h"
@@ -45,10 +46,12 @@
 static struct proxy_config g_cfg;
 static struct cache       *g_cache;     /* NULL이면 캐시 끔 */
 static atomic_int          g_active;    /* 진행 중인 연결 수 */
+static long long           g_start_us;  /* 시작 시각 (가동 시간 계산용) */
 
 int proxy_init(const struct proxy_config *cfg)
 {
     g_cfg = *cfg;
+    g_start_us = net_now_us();
     if (cfg->cache_capacity > 0) {
         g_cache = cache_create(cfg->cache_capacity, cfg->max_object);
         if (g_cache == NULL)
@@ -60,6 +63,17 @@ int proxy_init(const struct proxy_config *cfg)
 void proxy_conn_opened(void)  { atomic_fetch_add(&g_active, 1); }
 void proxy_conn_aborted(void) { atomic_fetch_sub(&g_active, 1); }
 int  proxy_active_conns(void) { return atomic_load(&g_active); }
+
+const struct proxy_config *proxy_config(void) { return &g_cfg; }
+long long proxy_uptime_ms(void) { return (net_now_us() - g_start_us) / 1000; }
+
+int proxy_cache_usage(struct cache_usage *u)
+{
+    if (g_cache == NULL)
+        return 0;
+    cache_get_usage(g_cache, u);
+    return 1;
+}
 
 /* ------------------------------------------------------------------ */
 /* 응답 보내기                                                          */
@@ -478,7 +492,7 @@ void *proxy_handle_connection(void *arg)
     memcpy(client, conn->addr, sizeof client);
     free(conn);
 
-    long long t0 = net_now_ms();
+    long long t0 = net_now_us();
     struct req_log lg = {
         .client = client, .method = "-", .target = "-",
         .outcome = OUT_ERROR,       /* 나머지 필드는 0 / NULL / 빈 문자열 */
@@ -505,10 +519,11 @@ void *proxy_handle_connection(void *arg)
     lg.method = req.method;
     lg.target = req.target;
 
-    /* ② 관제 요청 (4단계에서 /__stats, /__dashboard 구현) */
+    /* ② 관제 요청: 프록시 자신에게 온 요청 (/__stats, /__dashboard).
+     *    대시보드가 1초마다 조회하므로 통계와 기록에는 넣지 않는다 */
     if (req.is_control) {
-        reply_error(cfd, &lg, 501, "관제 기능은 아직 구현되지 않았습니다.");
-        goto out;
+        control_handle(cfd, &req);
+        goto out_quiet;
     }
 
     /* ③ GET만 지원 */
@@ -538,12 +553,12 @@ void *proxy_handle_connection(void *arg)
 
 out:
     /* ⑦ 통계와 기록 (lg.method, lg.target은 head를 가리키므로 함수가 끝나기 전에) */
-    lg.ms = net_now_ms() - t0;
+    lg.us = net_now_us() - t0;
     {
         struct stats_event ev = {
             .outcome = lg.outcome, .origin_requests = lg.origin_reqs,
             .peer_failures = lg.peer_failures, .from_peer = lg.from_peer,
-            .bytes = lg.bytes, .ms = lg.ms,
+            .bytes = lg.bytes, .us = lg.us,
         };
         stats_record(&ev);
     }
@@ -576,13 +591,13 @@ void proxy_report(void)
              s.requests, s.count[OUT_HIT], s.count[OUT_VALIDATED], s.count[OUT_STALE],
              s.count[OUT_MISS], s.count[OUT_REFRESH], s.count[OUT_FORWARD],
              s.count[OUT_BLOCKED], s.count[OUT_ERROR]);
-    log_info("통계: 히트율 %.1f%% | 원서버 요청 %lu | 평균 응답 %.1fms (최대 %lldms) | 전송 %.1fMB",
+    log_info("통계: 히트율 %.1f%% | 원서버 요청 %lu | 클라이언트 응답 평균 %.2fms (최대 %.1fms) | 전송 %.1fMB",
              stats_hit_ratio(&s) * 100.0, s.origin_requests,
-             s.requests ? (double)s.sum_ms / (double)s.requests : 0.0, s.max_ms,
-             (double)s.bytes / (1024.0 * 1024.0));
+             s.client.count ? (double)s.client.sum_us / (double)s.client.count / 1000.0 : 0.0,
+             (double)s.client.max_us / 1000.0, (double)s.bytes / (1024.0 * 1024.0));
     if (router_enabled())
         log_info("클러스터: 넘긴 요청 %lu | 넘겨받은 요청 %lu | 다른 노드 연결 실패 %lu회",
-                 s.count[OUT_FORWARD], s.from_peer, s.peer_failures);
+                 s.count[OUT_FORWARD], s.peer.count, s.peer_failures);
 
     if (g_cache != NULL) {
         struct cache_usage u;

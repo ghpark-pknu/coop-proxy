@@ -11,6 +11,7 @@ coop-proxy/
 ├─ include/      헤더 파일
 ├─ tools/        실험 도구 (Python): 원서버, 파일 생성기, 부하 생성기, 그래프
 ├─ conf/         노드 설정, 차단 목록
+├─ web/          관제 화면 (dashboard.html, 프록시가 /__dashboard로 제공)
 ├─ scripts/      check_env.sh 등 보조 스크립트
 ├─ sandbox/      환경 검증용 hello_server.c (본 프로젝트와 별개)
 ├─ www/          원서버가 제공할 테스트 파일 (git 제외, 스크립트로 생성)
@@ -39,6 +40,7 @@ curl -i -x http://127.0.0.1:8080 http://127.0.0.1:9000/page.html   # 터미널 C
 ./scripts/test_stage1.sh                        # 1단계(중계) 자동 점검
 ./scripts/test_stage2.sh                        # 2단계(캐시) 자동 점검
 ./scripts/test_stage3.sh                        # 3단계(클러스터) 자동 점검
+./scripts/test_stage4.sh                        # 4단계(관제·부하 생성기) 자동 점검
 ```
 
 ### 클러스터 (미니 CDN)
@@ -66,6 +68,29 @@ make rtest && ./build/debug/rendezvous_test     # 랑데부 해싱 단위 테스
 | `-C FILE` | 노드 목록 (주면 클러스터 모드, `-n` 이름이 목록에 있어야 함) | 없음 |
 | `-r MS` | 연결 실패한 노드를 건너뛰는 시간 | 5000 |
 | `-q` | 요청 기록 끄기 | 꺼짐 |
+
+### 실시간 관제와 부하 생성 (4단계)
+
+```bash
+./scripts/cluster.sh start                      # 원서버 + 클러스터 (관제 화면 주소를 출력)
+# 브라우저: http://localhost:8081/__dashboard     (노드 아무 곳이나: 8082, 8083도 같은 화면)
+curl -s http://127.0.0.1:8081/__stats | python3 -m json.tool    # 통계 JSON
+python3 tools/loadgen.py -d 60 -c 4 --rate 300  # 60초 동안 초당 300개 → 그래프가 움직인다
+python3 tools/loadgen.py -n 3000 -c 1 --stats   # 노드 통계와 맞춰 보기 (불변식 4개 확인)
+python3 tools/loadgen.py --dry-run -n 20000     # 요청열 분석: Zipf 이론값, 원서버 요청 예측
+CLUSTER=0 ./scripts/cluster.sh restart          # 비교 실험: 같은 요청열을 독립 프록시 3개에
+# 브라우저: http://localhost:8081/__dashboard?nodes=127.0.0.1:8081,127.0.0.1:8082,127.0.0.1:8083
+```
+
+| 관제 경로 | 응답 |
+|---|---|
+| `/__stats` | 통계 JSON (결과별 요청 수, 응답 시간 히스토그램, 캐시, 클러스터 노드 목록) |
+| `/__dashboard` | 실시간 관제 화면 (모든 노드의 `/__stats`를 1초마다 조회해 합친다) |
+| `/` | `/__dashboard`로 이동 (302) |
+
+부하 생성기 주요 옵션: `-n` 요청 수 / `-d` 시간(초) / `-c` 동시 연결 / `--rate` 초당 상한 /
+`--zipf` 지수(기본 0.8) / `--seed` 시드(같으면 같은 요청열) / `--warmup` 예열 /
+`--stats` 노드 통계 확인 / `--csv`, `--json` 결과 저장 / `--no-retry` 진입 노드 재연결 끔.
 
 ## 개발 환경
 

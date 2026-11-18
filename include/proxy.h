@@ -18,6 +18,7 @@ struct proxy_config {
     int    validate_sec;          /* 검증 주기: 저장 후 이 시간이 지나면 원서버에 확인 */
     char   blocklist[256];        /* 차단 목록 파일 경로 (없으면 빈 문자열) */
     char   cluster_conf[256];     /* 노드 목록 파일 경로 (없으면 독립 프록시) */
+    char   dashboard_path[1024];  /* 관제 화면 파일 (web/dashboard.html). 못 찾으면 빈 문자열 */
     int    port_given;            /* -p를 직접 지정했는가 (클러스터 모드에서 포트 확인용) */
     int    peer_retry_ms;         /* 연결에 실패한 노드를 다시 시도하기까지 건너뛰는 시간 */
 };
@@ -42,6 +43,12 @@ int  proxy_active_conns(void);
 
 /* 통계 요약을 기록으로 출력 */
 void proxy_report(void);
+
+/* ---- 관제(control.c)가 읽는 상태 ---- */
+struct cache_usage;
+const struct proxy_config *proxy_config(void);       /* 실행 설정 (읽기 전용) */
+long long proxy_uptime_ms(void);                     /* 시작 후 지난 시간 */
+int  proxy_cache_usage(struct cache_usage *u);       /* 캐시를 쓰면 1과 사용량, 끄면 0 */
 
 /* 캐시 해제. 진행 중인 연결이 없을 때만 호출해야 한다 */
 void proxy_cleanup(void);

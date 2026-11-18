@@ -153,8 +153,15 @@ do_start() {
     else
         echo "시작 (MODE=$MODE, 독립 프록시)"
     fi
-    local rc=0 n
+    local rc=0 n list=""
     for n in "${targets[@]}"; do start_one "$n" || rc=1; done
+    # 관제 화면 주소 (독립 프록시는 서로를 모르므로 노드 목록을 주소에 붙인다)
+    for n in "${NODES[@]}"; do list="$list${list:+,}127.0.0.1:${PORT[$n]}"; done
+    if [ "$CLUSTER" = 1 ]; then
+        echo "관제 화면: http://localhost:${PORT[${NODES[0]}]}/__dashboard"
+    else
+        echo "관제 화면: http://localhost:${PORT[${NODES[0]}]}/__dashboard?nodes=$list"
+    fi
     return $rc
 }
 

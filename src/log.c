@@ -51,9 +51,9 @@ void log_request(const struct req_log *r)
         snprintf(result, sizeof result, "%s", outcome_name(r->outcome));
 
     char line[1024];
-    snprintf(line, sizeof line, "%s [%s] %s %s %.300s %s %lldB %lldms %s%s%s\n",
-             ts, g_node, r->client, r->method, r->target, status, r->bytes, r->ms, result,
-             r->route[0] ? " " : "", r->route);
+    snprintf(line, sizeof line, "%s [%s] %s %s %.300s %s %lldB %.1fms %s%s%s\n",
+             ts, g_node, r->client, r->method, r->target, status, r->bytes, (double)r->us / 1000.0,
+             result, r->route[0] ? " " : "", r->route);
     fputs(line, stdout);
 }
 

@@ -1,0 +1,942 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>클러스터 관제 · 협력형 웹 캐싱 프록시</title>
+<!--
+  협력형 웹 캐싱 프록시 클러스터 — 실시간 관제 화면 (4단계)
+
+  동작
+    1) 이 화면을 보낸 노드의 /__stats에서 클러스터 노드 목록을 읽는다.
+       주소 뒤에 ?nodes=127.0.0.1:8081,127.0.0.1:8082 처럼 직접 줄 수도 있다 (독립 프록시 비교용).
+    2) 1초마다 모든 노드의 /__stats를 직접 조회한다. 노드는 Access-Control-Allow-Origin 헤더로
+       다른 포트(다른 출처)에서 온 화면의 조회를 허용한다.
+    3) 통계는 시작 후 누적값이므로, 직전 조회와의 차이를 걸린 시간(가동 시간의 차이)으로 나눠
+       초당 값을 구한다. 가동 시간이 줄었으면(노드 재시작) 기준점을 새로 잡는다.
+    4) 클러스터 값: 초당 값은 노드별 초당 값의 합, 비율과 평균은 개수를 모두 더해서 나눈다.
+       클라이언트 요청 하나는 직접 응답한 노드 한 곳에서만 HIT·MISS로 세어지므로
+       (넘긴 노드는 FORWARD로 셈) 합으로 구한 히트율이 곧 클러스터 전체 히트율이다.
+
+  화면 파일을 고친 뒤 브라우저를 새로고침하면 바로 반영된다 (프록시가 요청마다 파일을 읽는다).
+-->
+<style>
+/* 색과 글자색 토큰. 범주 색 순서는 고정: 1 = 클러스터 전체, 2부터 = 노드(목록 순서) */
+.viz-root {
+  color-scheme: light;
+  --page:           #f9f9f7;
+  --surface-1:      #fcfcfb;
+  --text-primary:   #0b0b0b;
+  --text-secondary: #52514e;
+  --text-muted:     #898781;
+  --grid:           #e1e0d9;
+  --axis:           #c3c2b7;
+  --border:         rgba(11, 11, 11, 0.10);
+  --hover-wash:     rgba(11, 11, 11, 0.04);
+  --series-1: #2a78d6;  --series-2: #eb6834;  --series-3: #1baf7a;  --series-4: #eda100;
+  --series-5: #e87ba4;  --series-6: #008300;  --series-7: #6250d6;  --series-8: #e34948;
+  --series-1-soft: #86b6ef;     /* 같은 파랑의 옅은 단계: p95 응답 시간 */
+  --meter-track:   #cde2fb;
+  --meter-fill:    #2a78d6;
+  --status-good:     #0ca30c;
+  --status-critical: #d03b3b;
+}
+@media (prefers-color-scheme: dark) {
+  .viz-root {
+    color-scheme: dark;
+    --page:           #0d0d0d;
+    --surface-1:      #1a1a19;
+    --text-primary:   #f0efec;
+    --text-secondary: #c3c2b7;
+    --text-muted:     #898781;
+    --grid:           #2c2c2a;
+    --axis:           #383835;
+    --border:         rgba(255, 255, 255, 0.10);
+    --hover-wash:     rgba(255, 255, 255, 0.05);
+    --series-1: #3987e5;  --series-2: #d95926;  --series-3: #199e70;  --series-4: #c98500;
+    --series-5: #d55181;  --series-6: #0ca30c;  --series-7: #9085e9;  --series-8: #e66767;
+    --series-1-soft: #184f95;
+    --meter-track:   #104281;
+    --meter-fill:    #3987e5;
+  }
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body.viz-root {
+  min-height: 100vh;
+  background: var(--page);
+  color: var(--text-primary);
+  font: 14px/1.45 system-ui, -apple-system, "Segoe UI", "Malgun Gothic", "Apple SD Gothic Neo", "Noto Sans KR", "Noto Sans CJK KR", sans-serif;
+}
+.wrap { max-width: 1440px; margin: 0 auto; padding: 20px 24px 32px; }
+h1 { font-size: 20px; font-weight: 600; margin: 0; }
+h2 { font-size: 15px; font-weight: 600; margin: 0; }
+.muted { color: var(--text-muted); }
+code { font-size: 12px; }
+
+/* 맨 위: 제목과 조작 버튼 */
+.top { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; flex-wrap: wrap; margin-bottom: 16px; }
+.top .sub { margin: 2px 0 0; color: var(--text-secondary); }
+.controls { display: flex; align-items: center; gap: 12px; }
+button {
+  font: inherit; color: var(--text-primary); background: var(--surface-1);
+  border: 1px solid var(--border); border-radius: 6px; padding: 4px 12px; cursor: pointer;
+}
+button:hover { background: var(--hover-wash); }
+button:focus-visible, svg:focus-visible { outline: 2px solid var(--series-1); outline-offset: 2px; }
+
+/* 요약 타일 */
+.kpis { display: grid; grid-template-columns: repeat(5, minmax(150px, 1fr)); gap: 12px; margin-bottom: 16px; }
+.tile { background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; }
+.tile .label { color: var(--text-secondary); font-size: 13px; }
+.tile .value { font-size: 28px; font-weight: 600; line-height: 1.2; margin-top: 4px; }
+.tile .value .unit { font-size: 14px; font-weight: 400; color: var(--text-secondary); margin-left: 3px; }
+.tile .note { color: var(--text-muted); font-size: 12px; margin-top: 2px; }
+
+/* 그래프 카드 */
+.grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-bottom: 16px; }
+.card { position: relative; background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px 10px; margin: 0; }
+.card-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+.card-head .unit { color: var(--text-muted); font-size: 12px; margin-left: 8px; font-weight: 400; }
+.card-head button { font-size: 12px; padding: 2px 8px; flex: none; }
+.legend { display: flex; flex-wrap: wrap; gap: 4px 14px; margin: 6px 0 2px; min-height: 18px; font-size: 12px; color: var(--text-secondary); }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.key { display: inline-block; width: 14px; height: 2px; border-radius: 1px; flex: none; }
+.plot { width: 100%; }
+.plot svg { display: block; }
+.plot .grid-line { stroke: var(--grid); stroke-width: 1; shape-rendering: crispEdges; }
+.plot .axis-line { stroke: var(--axis); stroke-width: 1; shape-rendering: crispEdges; }
+.plot .tick { fill: var(--text-muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.plot .line { fill: none; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+.plot .end-dot { stroke: var(--surface-1); stroke-width: 2; }
+.plot .end-label { fill: var(--text-secondary); font-size: 11px; }
+.plot .empty { fill: var(--text-muted); font-size: 12px; }
+.plot .crosshair { stroke: var(--text-muted); stroke-width: 1; shape-rendering: crispEdges; }
+.plot .hit { fill: transparent; cursor: crosshair; }
+.table-wrap { margin-top: 8px; max-height: 260px; overflow: auto; }
+
+/* 표 */
+table { border-collapse: collapse; width: 100%; font-size: 13px; }
+th, td { padding: 6px 10px; text-align: right; white-space: nowrap; border-bottom: 1px solid var(--grid); }
+th { color: var(--text-secondary); font-weight: 500; }
+th:first-child, td:first-child { text-align: left; }
+td { font-variant-numeric: tabular-nums; }
+tbody tr:hover { background: var(--hover-wash); }
+.nodes { padding-bottom: 12px; }
+.nodes .scroll { overflow-x: auto; margin-top: 8px; }
+.nodes td.status-cell { text-align: left; }
+.swatch { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 8px; vertical-align: -1px; }
+.tag { font-size: 11px; color: var(--text-muted); margin-left: 6px; }
+.status { display: inline-flex; align-items: center; gap: 5px; }
+.status .icon { font-size: 11px; line-height: 1; }
+.meter { display: inline-block; width: 72px; height: 6px; border-radius: 3px; background: var(--meter-track); vertical-align: middle; margin-right: 8px; overflow: hidden; }
+.meter i { display: block; height: 100%; border-radius: 3px; background: var(--meter-fill); }
+
+/* 툴팁: 값이 먼저(굵게), 이름은 뒤(옅게) */
+.tooltip {
+  position: absolute; z-index: 5; pointer-events: none; min-width: 120px;
+  background: var(--surface-1); border: 1px solid var(--border); border-radius: 8px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12); padding: 8px 10px; font-size: 12px;
+}
+.tooltip .when { color: var(--text-muted); margin-bottom: 4px; }
+.tooltip .row { display: flex; align-items: center; gap: 8px; }
+.tooltip .row b { font-weight: 600; }
+.tooltip .row .name { color: var(--text-secondary); }
+
+footer { margin-top: 18px; font-size: 12px; color: var(--text-muted); }
+/* 조회가 모두 실패하면 직전 화면을 흐리게 유지한다 (빈 화면이나 깜빡임 없이) */
+.stale .kpis, .stale .grid, .stale .nodes { opacity: 0.55; transition: opacity 0.2s; }
+
+@media (max-width: 1100px) { .kpis { grid-template-columns: repeat(3, minmax(150px, 1fr)); } }
+@media (max-width: 900px)  { .grid { grid-template-columns: minmax(0, 1fr); } }
+@media (max-width: 560px)  { .kpis { grid-template-columns: repeat(2, minmax(140px, 1fr)); } .wrap { padding: 14px; } }
+</style>
+</head>
+<body class="viz-root">
+<div class="wrap">
+  <header class="top">
+    <div>
+      <h1 id="title">클러스터 관제</h1>
+      <p class="sub" id="subtitle">노드 목록을 불러오는 중…</p>
+    </div>
+    <div class="controls">
+      <span class="muted" id="status-line">연결 중…</span>
+      <button type="button" id="pause" aria-pressed="false">일시정지</button>
+    </div>
+  </header>
+
+  <section class="kpis" aria-label="전체 요약 (최근 5초)">
+    <div class="tile"><div class="label">클라이언트 요청</div><div class="value" id="kpi-rps">–</div><div class="note" id="kpi-rps-note">최근 5초</div></div>
+    <div class="tile"><div class="label">전체 히트율</div><div class="value" id="kpi-hit">–</div><div class="note" id="kpi-hit-note">최근 5초</div></div>
+    <div class="tile"><div class="label">원서버 요청</div><div class="value" id="kpi-origin">–</div><div class="note" id="kpi-origin-note">최근 5초</div></div>
+    <div class="tile"><div class="label">평균 응답 시간</div><div class="value" id="kpi-avg">–</div><div class="note" id="kpi-avg-note">최근 5초</div></div>
+    <div class="tile"><div class="label">p95 응답 시간</div><div class="value" id="kpi-p95">–</div><div class="note">최근 5초 · 히스토그램으로 근사</div></div>
+  </section>
+
+  <section class="grid" id="charts"></section>
+
+  <section class="card nodes" aria-labelledby="nodes-title">
+    <div class="card-head"><h2 id="nodes-title">노드<span class="unit">초당 값·히트율·응답 시간은 최근 5초, 나머지는 시작 후 누적</span></h2></div>
+    <div class="scroll">
+      <table id="node-table">
+        <thead>
+          <tr>
+            <th scope="col">노드</th><th scope="col">상태</th>
+            <th scope="col">클라이언트 요청/s</th><th scope="col">직접 처리/s</th>
+            <th scope="col">넘긴 요청/s</th><th scope="col">넘겨받은 요청/s</th>
+            <th scope="col">히트율</th><th scope="col">누적 히트율</th><th scope="col">원서버/s</th>
+            <th scope="col">평균 ms</th><th scope="col">p95 ms</th>
+            <th scope="col">캐시 사용</th><th scope="col">객체</th><th scope="col">LRU 교체</th><th scope="col">연결 실패</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+  <footer>
+    각 노드의 <code>/__stats</code>를 1초마다 직접 조회합니다.
+    독립 프록시 여러 개를 한 화면에서 보려면 주소 뒤에
+    <code>?nodes=127.0.0.1:8081,127.0.0.1:8082,127.0.0.1:8083</code> 를 붙이세요.
+  </footer>
+</div>
+
+<script>
+'use strict';
+
+/* ================================================================== */
+/* 순수 계산 함수: 화면(DOM) 없이도 동작한다 (Node.js로 단위 테스트)    */
+/* ================================================================== */
+
+/* 결과 묶음: 캐시로 응답한 것 / 원서버에서 받아 응답한 것 */
+var HIT_KINDS  = ['HIT', 'VALIDATED', 'STALE'];
+var MISS_KINDS = ['MISS', 'REFRESH'];
+
+function sumKinds(outcomes, kinds) {
+  var s = 0;
+  for (var i = 0; i < kinds.length; i++) s += outcomes[kinds[i]] || 0;
+  return s;
+}
+
+/* 누적 통계 두 개(prev → cur)의 차이와 걸린 시간(초).
+ * 노드가 재시작해 가동 시간이나 개수가 줄었으면 null (호출한 쪽이 기준점을 새로 잡는다) */
+function counterDelta(prev, cur) {
+  if (!prev || !cur) return null;
+  var dt = (cur.uptime_ms - prev.uptime_ms) / 1000;
+  if (!(dt > 0)) return null;
+  var d = {
+    dt: dt,
+    client:   cur.requests.client - prev.requests.client,
+    peer:     cur.requests.peer - prev.requests.peer,
+    hits:     sumKinds(cur.outcomes, HIT_KINDS) - sumKinds(prev.outcomes, HIT_KINDS),
+    misses:   sumKinds(cur.outcomes, MISS_KINDS) - sumKinds(prev.outcomes, MISS_KINDS),
+    forward:  (cur.outcomes.FORWARD || 0) - (prev.outcomes.FORWARD || 0),
+    origin:   cur.origin_requests - prev.origin_requests,
+    latCount: cur.latency.client.count - prev.latency.client.count,
+    latSumUs: cur.latency.client.sum_us - prev.latency.client.sum_us,
+    hist: []
+  };
+  var keys = ['client', 'peer', 'hits', 'misses', 'forward', 'origin', 'latCount', 'latSumUs'];
+  for (var k = 0; k < keys.length; k++) if (d[keys[k]] < 0) return null;
+  var h1 = cur.latency.client.hist, h0 = prev.latency.client.hist;
+  if (h1.length !== h0.length) return null;
+  for (var i = 0; i < h1.length; i++) {
+    var v = h1[i] - h0[i];
+    if (v < 0) return null;
+    d.hist.push(v);
+  }
+  return d;
+}
+
+/* 여러 노드의 델타를 합친다.
+ *   초당 값(…Rate): 노드마다 (개수 / 그 노드의 걸린 시간)을 구해 더한다.
+ *     한 노드가 조회를 한 번 놓쳐 2초치 델타가 와도 2초로 나누므로 합이 부풀지 않는다.
+ *   비율·평균: 개수를 모두 더한 뒤 나눈다 (요청 수로 가중한 값). */
+function aggregate(deltas) {
+  var a = { n: 0, clientRate: 0, peerRate: 0, forwardRate: 0, handledRate: 0, originRate: 0,
+            client: 0, hits: 0, misses: 0, origin: 0, latCount: 0, latSumUs: 0, hist: [] };
+  for (var i = 0; i < deltas.length; i++) {
+    var d = deltas[i];
+    if (!d) continue;
+    a.n++;
+    a.clientRate  += d.client / d.dt;
+    a.peerRate    += d.peer / d.dt;
+    a.forwardRate += d.forward / d.dt;
+    a.handledRate += (d.hits + d.misses) / d.dt;
+    a.originRate  += d.origin / d.dt;
+    a.client += d.client; a.hits += d.hits; a.misses += d.misses; a.origin += d.origin;
+    a.latCount += d.latCount; a.latSumUs += d.latSumUs;
+    for (var j = 0; j < d.hist.length; j++) a.hist[j] = (a.hist[j] || 0) + d.hist[j];
+  }
+  return a.n > 0 ? a : null;
+}
+
+function hitRatio(a)     { return a && a.hits + a.misses > 0 ? a.hits / (a.hits + a.misses) : null; }
+function avgLatencyUs(a) { return a && a.latCount > 0 ? a.latSumUs / a.latCount : null; }
+
+/* 히스토그램으로 q 분위수(마이크로초)를 근사한다.
+ * 구간 i는 (bounds[i-1], bounds[i]] (stats.c의 stats_bucket과 같은 규칙), 첫 구간의 하한은 0,
+ * 마지막 구간은 상한이 없어 마지막 경계의 2배로 둔다.
+ * 구간 안에서는 고르게 퍼져 있다고 보고 직선 보간한다 (Prometheus histogram_quantile과 같은 방식). */
+function percentileFromHist(bounds, hist, q) {
+  var total = 0, i;
+  for (i = 0; i < hist.length; i++) total += hist[i] || 0;
+  if (total <= 0) return null;
+  var rank = q * total, cum = 0;
+  for (i = 0; i < hist.length; i++) {
+    var c = hist[i] || 0;
+    if (c > 0 && cum + c >= rank) {
+      var lo = i === 0 ? 0 : bounds[i - 1];
+      var hi = i < bounds.length ? bounds[i] : bounds[bounds.length - 1] * 2;
+      return lo + (hi - lo) * Math.max(0, rank - cum) / c;
+    }
+    cum += c;
+  }
+  return bounds[bounds.length - 1] * 2;
+}
+
+/* 축 눈금: 최댓값을 덮는 깔끔한 간격 (1, 2, 2.5, 5 × 10^k), 간격 최대 maxTicks개 */
+function niceScale(max, maxTicks) {
+  maxTicks = maxTicks || 4;
+  if (!(max > 0)) return { max: 1, step: 0.5 };
+  var rough = max / maxTicks;
+  var mag = Math.pow(10, Math.floor(Math.log10(rough)));
+  var norm = rough / mag;
+  var step = (norm <= 1 ? 1 : norm <= 2 ? 2 : norm <= 2.5 ? 2.5 : norm <= 5 ? 5 : 10) * mag;
+  return { max: step * Math.ceil(max / step - 1e-9), step: step };
+}
+
+/* 눈금 간격을 정확히 쓰는 데 필요한 소수 자릿수 (0.25 → 2, 2.5 → 1, 50 → 0) */
+function stepDigits(step) {
+  for (var d = 0; d < 6; d++) {
+    var r = step * Math.pow(10, d);
+    if (Math.abs(r - Math.round(r)) < 1e-6) return d;
+  }
+  return 6;
+}
+
+function isLoopback(host) {
+  return host === '127.0.0.1' || host === 'localhost' || host === '::1' || host === '[::1]';
+}
+
+/* 조회할 노드 목록을 정한다.
+ *   nodesParam: 주소의 ?nodes= 값 (예 "127.0.0.1:8081,127.0.0.1:8082"), 없으면 ""
+ *   selfStats : 이 화면을 보낸 노드의 /__stats (클러스터 노드 목록이 들어 있다)
+ *   pageHost  : 브라우저 주소창의 호스트. 루프백 주소는 이것으로 바꿔 조회한다
+ *               (Windows 브라우저에서 localhost로 연 WSL 화면처럼, 이름이 달라도 같은 PC를 가리키게) */
+function resolveNodes(nodesParam, selfStats, pageHost) {
+  var base = pageHost || '127.0.0.1';          /* 파일로 직접 열면 호스트가 비어 있다 */
+  var list = [], seen = {};
+  function add(key, name, host, port, fromParam) {
+    if (seen[key]) return;
+    seen[key] = true;
+    var h = isLoopback(host) ? base : host;
+    if (h.indexOf(':') >= 0 && h.charAt(0) !== '[') h = '[' + h + ']';     /* IPv6 주소 */
+    list.push({ key: key, name: name, url: 'http://' + h + ':' + port + '/__stats', fromParam: fromParam });
+  }
+  if (nodesParam) {
+    nodesParam.split(',').forEach(function (hp) {
+      hp = hp.trim();
+      var m = /^(\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9._-]+):(\d{1,5})$/.exec(hp);
+      if (!m || +m[2] < 1 || +m[2] > 65535) return;
+      add(hp, hp, m[1], +m[2], true);
+    });
+    return list;
+  }
+  if (selfStats && selfStats.cluster && selfStats.cluster.length > 0) {
+    selfStats.cluster.forEach(function (n) { add(n.name, n.name, n.host, n.port, false); });
+    return list;
+  }
+  var name = selfStats && selfStats.node ? selfStats.node : '이 노드';
+  list.push({ key: name, name: name, url: '/__stats', fromParam: false });
+  return list;
+}
+
+/* ?nodes=로 준 노드의 표시 이름: 노드가 알려 준 이름(-n)이 서로 겹치지 않으면 그 이름, 아니면 주소 */
+function displayNames(entries) {
+  var count = {};
+  entries.forEach(function (e) { if (e.reported) count[e.reported] = (count[e.reported] || 0) + 1; });
+  return entries.map(function (e) { return e.reported && count[e.reported] === 1 ? e.reported : e.key; });
+}
+
+/* 숫자 표시 */
+function fmtRate(v) {
+  if (v == null || !isFinite(v)) return '–';
+  return v < 10 ? v.toFixed(1) : Math.round(v).toLocaleString('ko-KR');
+}
+function fmtPct(r) {                 /* 0~1 비율 → "73.4" */
+  if (r == null || !isFinite(r)) return '–';
+  return (r * 100).toFixed(1);
+}
+function fmtMs(us) {                 /* 마이크로초 → 밀리초 문자열 */
+  if (us == null || !isFinite(us)) return '–';
+  var ms = us / 1000;
+  return ms < 10 ? ms.toFixed(2) : ms < 100 ? ms.toFixed(1) : Math.round(ms).toLocaleString('ko-KR');
+}
+function fmtCount(v) { return v == null || !isFinite(v) ? '–' : Math.round(v).toLocaleString('ko-KR'); }
+function fmtBytes(b) {
+  if (b == null || !isFinite(b)) return '–';
+  if (b >= 1073741824) return (b / 1073741824).toFixed(1) + 'GB';
+  if (b >= 1048576) return (b / 1048576).toFixed(b >= 10485760 ? 0 : 1) + 'MB';
+  if (b >= 1024) return Math.round(b / 1024) + 'KB';
+  return b + 'B';
+}
+function fmtTick(v, digits) {
+  return v.toLocaleString('ko-KR', { minimumFractionDigits: digits, maximumFractionDigits: digits });
+}
+
+/* ================================================================== */
+/* 화면                                                                 */
+/* ================================================================== */
+
+if (typeof document !== 'undefined') (function () {
+  var POLL_MS = 1000;       /* 조회 간격 */
+  var WINDOW = 61;          /* 그래프의 점 수: 60초 전 ~ 지금 */
+  var KPI_SPAN = 5;         /* 요약 타일과 노드 표: 최근 5초 */
+  var SVGNS = 'http://www.w3.org/2000/svg';
+
+  var root = document.body;
+  var wrap = document.querySelector('.wrap');
+  var nodes = [];           /* {key, name, url, fromParam, color, up, last, latest, recent[]} */
+  var history = [];         /* 조회 한 번에 한 점: {nodes: {key: 델타 또는 null}, cluster: 합친 값} */
+  var frozen = null;        /* 일시정지한 순간의 history (그동안에도 조회는 계속한다) */
+  var paused = false;
+  var bounds = null;        /* 히스토그램 구간 경계 (첫 응답에서 가져온다) */
+  var tip = null;           /* 그래프들이 함께 쓰는 툴팁 */
+
+  function cssVar(name) { return getComputedStyle(root).getPropertyValue(name).trim(); }
+  /* 노드 색은 목록 순서로 고정: 범주 색 2번부터 (1번 파랑은 클러스터 전체에만 쓴다).
+   * 범주 색은 8개뿐이라 8번째 노드부터는 회색 (범례·툴팁·표의 이름으로 구별) */
+  function nodeColor(i) { return i < 7 ? cssVar('--series-' + (i + 2)) : cssVar('--text-muted'); }
+
+  function fetchStats(url) {
+    var ctrl = new AbortController();
+    var timer = setTimeout(function () { ctrl.abort(); }, 900);
+    return fetch(url, { cache: 'no-store', signal: ctrl.signal })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (j) { return j && j.requests && j.outcomes && j.latency && j.cache ? j : null; })
+      .catch(function () { return null; })
+      .finally(function () { clearTimeout(timer); });
+  }
+
+  function svgEl(tag, attrs, parent) {
+    var e = document.createElementNS(SVGNS, tag);
+    for (var k in attrs) e.setAttribute(k, attrs[k]);
+    if (parent) parent.appendChild(e);
+    return e;
+  }
+  function clear(el) { while (el.firstChild) el.removeChild(el.firstChild); }
+  function secondsAgo(i) { var s = WINDOW - 1 - i; return s === 0 ? '지금' : s + '초 전'; }
+
+  /* ---------------- 그래프 정의 ---------------- */
+  /* value(p): history의 한 점 p에서 그릴 숫자를 꺼낸다 (없으면 null → 선이 끊긴다) */
+  var charts = [
+    { title: '노드별 처리량', unit: '요청/s · 캐시나 원서버로 직접 응답한 요청', fmt: fmtRate,
+      series: function () {
+        return nodes.map(function (n) {
+          return { label: n.name, color: n.color,
+                   value: function (p) { var d = p.nodes[n.key]; return d ? (d.hits + d.misses) / d.dt : null; } };
+        });
+      } },
+    { title: '전체 히트율', unit: '% · 모든 노드 합산, 캐시로 응답한 비율', fixedMax: 100,
+      fmt: function (v) { return v == null ? '–' : v.toFixed(1); },
+      series: function () {
+        return [{ label: '히트율', color: cssVar('--series-1'),
+                  value: function (p) { var r = hitRatio(p.cluster); return r == null ? null : r * 100; } }];
+      } },
+    { title: '응답 시간', unit: 'ms · 클라이언트가 받은 응답 기준', fmt: function (v) { return fmtMs(v == null ? null : v * 1000); },
+      series: function () {
+        return [
+          { label: '평균', color: cssVar('--series-1'),
+            value: function (p) { var a = avgLatencyUs(p.cluster); return a == null ? null : a / 1000; } },
+          { label: 'p95', color: cssVar('--series-1-soft'),
+            value: function (p) {
+              var v = p.cluster && bounds ? percentileFromHist(bounds, p.cluster.hist, 0.95) : null;
+              return v == null ? null : v / 1000;
+            } }
+        ];
+      } },
+    { title: '원서버 요청', unit: '요청/s · 모든 노드 합산', fmt: fmtRate,
+      series: function () {
+        return [{ label: '원서버 요청', color: cssVar('--series-1'),
+                  value: function (p) { return p.cluster ? p.cluster.originRate : null; } }];
+      } }
+  ];
+
+  function buildChartCards() {
+    var host = document.getElementById('charts');
+    charts.forEach(function (ch) {
+      var fig = document.createElement('figure');
+      fig.className = 'card';
+      fig.innerHTML =
+        '<div class="card-head"><h2></h2><button type="button" aria-pressed="false">표로 보기</button></div>' +
+        '<div class="legend"></div><div class="plot"></div><div class="table-wrap" hidden></div>';
+      var h2 = fig.querySelector('h2');
+      h2.textContent = ch.title;
+      var u = document.createElement('span');
+      u.className = 'unit';
+      u.textContent = ch.unit;
+      h2.appendChild(u);
+      ch.el = fig;
+      ch.legendEl = fig.querySelector('.legend');
+      ch.plotEl = fig.querySelector('.plot');
+      ch.tableEl = fig.querySelector('.table-wrap');
+      ch.hover = null;              /* 십자선이 가리키는 점 번호 (없으면 null) */
+      ch.frame = null;              /* 한 번 만든 SVG 틀을 계속 쓴다: 갱신해도 초점·십자선이 유지된다 */
+      ch.legendSig = null;
+      var btn = fig.querySelector('button');
+      btn.addEventListener('click', function () {
+        var show = ch.tableEl.hidden;
+        ch.tableEl.hidden = !show;
+        btn.setAttribute('aria-pressed', String(show));
+        btn.textContent = show ? '표 닫기' : '표로 보기';
+        renderChartTable(ch);
+      });
+      host.appendChild(fig);
+    });
+  }
+
+  /* 그래프 틀: 처음 한 번, 그리고 폭이 바뀌었을 때만 새로 만든다 */
+  function ensureFrame(ch) {
+    var W = Math.max(280, Math.floor(ch.plotEl.clientWidth));
+    if (ch.frame && ch.frame.W === W) return ch.frame;
+    var m = { l: 48, r: 96, t: 10, b: 26 }, H = 214;
+    var f = { W: W, H: H, m: m, pw: W - m.l - m.r, ph: H - m.t - m.b };
+    f.x = function (i) { return m.l + f.pw * i / (WINDOW - 1); };
+
+    var svg = svgEl('svg', { width: W, height: H, viewBox: '0 0 ' + W + ' ' + H, role: 'img', tabindex: '0',
+      'aria-label': ch.title + ' 그래프, 최근 60초. 왼쪽·오른쪽 화살표로 시점을 옮기면 값이 표시됩니다. 같은 값을 표로 보기에서도 볼 수 있습니다.' });
+    f.svg = svg;
+    f.gAxes = svgEl('g', {}, svg);
+    f.gLines = svgEl('g', {}, svg);
+    f.gEnds = svgEl('g', {}, svg);
+    f.cross = svgEl('line', { x1: 0, x2: 0, y1: m.t, y2: m.t + f.ph, 'class': 'crosshair', visibility: 'hidden' }, svg);
+    var hit = svgEl('rect', { x: m.l, y: m.t, width: f.pw, height: f.ph, 'class': 'hit' }, svg);
+
+    function indexAt(clientX) {
+      var r = svg.getBoundingClientRect();
+      var i = Math.round((clientX - r.left - m.l) / f.pw * (WINDOW - 1));
+      return Math.max(0, Math.min(WINDOW - 1, i));
+    }
+    hit.addEventListener('pointermove', function (ev) { ch.hover = indexAt(ev.clientX); showHover(ch); });
+    hit.addEventListener('pointerleave', function () { ch.hover = null; hideHover(ch); });
+    svg.addEventListener('focus', function () { if (ch.hover == null) ch.hover = WINDOW - 1; showHover(ch); });
+    svg.addEventListener('blur', function () { ch.hover = null; hideHover(ch); });
+    svg.addEventListener('keydown', function (ev) {
+      var cur = ch.hover == null ? WINDOW - 1 : ch.hover;
+      if (ev.key === 'ArrowLeft') ch.hover = Math.max(0, cur - 1);
+      else if (ev.key === 'ArrowRight') ch.hover = Math.min(WINDOW - 1, cur + 1);
+      else if (ev.key === 'Home') ch.hover = 0;
+      else if (ev.key === 'End') ch.hover = WINDOW - 1;
+      else if (ev.key === 'Escape') { svg.blur(); return; }
+      else return;
+      ev.preventDefault();
+      showHover(ch);
+    });
+
+    ch.plotEl.textContent = '';
+    ch.plotEl.appendChild(svg);
+    ch.frame = f;
+    return f;
+  }
+
+  /* 오른쪽 끝(지금)에 맞춰 WINDOW개로 채운 값 */
+  function valuesOf(s, src) {
+    var vals = [];
+    for (var i = 0; i < WINDOW; i++) {
+      var h = src.length - WINDOW + i;
+      var v = h >= 0 ? s.value(src[h]) : null;
+      vals.push(v != null && isFinite(v) ? v : null);
+    }
+    return vals;
+  }
+
+  function renderLegend(ch, series) {
+    /* 계열이 2개 이상일 때만 (하나면 제목이 이름을 대신한다) */
+    var sig = series.length >= 2 ? series.map(function (s) { return s.label + '|' + s.color; }).join(',') : '';
+    if (sig === ch.legendSig) return;
+    ch.legendSig = sig;
+    clear(ch.legendEl);
+    if (!sig) return;
+    series.forEach(function (s) {
+      var item = document.createElement('span');
+      var key = document.createElement('i');
+      key.className = 'key';
+      key.style.background = s.color;
+      item.appendChild(key);
+      item.appendChild(document.createTextNode(s.label));
+      ch.legendEl.appendChild(item);
+    });
+  }
+
+  function updateChart(ch) {
+    var f = ensureFrame(ch);
+    var src = paused && frozen ? frozen : history;
+    var series = ch.series().map(function (s) { s.values = valuesOf(s, src); return s; });
+    ch.current = series;
+    renderLegend(ch, series);
+
+    var maxV = 0, any = false;
+    series.forEach(function (s) {
+      s.values.forEach(function (v) { if (v != null) { any = true; if (v > maxV) maxV = v; } });
+    });
+    var sc = ch.fixedMax ? { max: ch.fixedMax, step: ch.fixedMax / 4 } : niceScale(maxV, 4);
+    var digits = stepDigits(sc.step);
+    var m = f.m;
+    var y = function (v) { return m.t + f.ph - (Math.min(v, sc.max) / sc.max) * f.ph; };
+
+    /* 눈금선(회색 실선 1px, 0은 축 색)과 값 눈금 */
+    clear(f.gAxes);
+    var nTicks = Math.round(sc.max / sc.step);
+    for (var k = 0; k <= nTicks; k++) {
+      var v = k * sc.step;
+      var yy = Math.round(y(v)) + 0.5;
+      svgEl('line', { x1: m.l, x2: m.l + f.pw, y1: yy, y2: yy, 'class': k === 0 ? 'axis-line' : 'grid-line' }, f.gAxes);
+      svgEl('text', { x: m.l - 8, y: yy + 4, 'text-anchor': 'end', 'class': 'tick' }, f.gAxes).textContent = fmtTick(v, digits);
+    }
+    /* 시간 눈금: 60초 전 ~ 지금, 15초 간격 */
+    [0, 15, 30, 45, 60].forEach(function (i) {
+      svgEl('text', { x: f.x(i), y: f.H - 6, 'text-anchor': i === 0 ? 'start' : i === 60 ? 'end' : 'middle', 'class': 'tick' },
+            f.gAxes).textContent = secondsAgo(i);
+    });
+    if (!any) {
+      svgEl('text', { x: m.l + f.pw / 2, y: m.t + f.ph / 2, 'text-anchor': 'middle', 'class': 'empty' }, f.gAxes)
+        .textContent = src.length < 2 ? '데이터를 모으는 중…' : '이 구간에는 요청이 없습니다';
+    }
+
+    /* 선: 2px. 값이 없는 곳(null)에서는 끊는다 */
+    clear(f.gLines);
+    series.forEach(function (s) {
+      var d = '', pen = false;
+      s.values.forEach(function (val, i) {
+        if (val == null) { pen = false; return; }
+        d += (pen ? 'L' : 'M') + f.x(i).toFixed(1) + ' ' + y(val).toFixed(1);
+        pen = true;
+      });
+      if (d) svgEl('path', { d: d, 'class': 'line', stroke: s.color }, f.gLines);
+    });
+
+    /* 지금 시점의 끝점과 값 라벨. 다른 라벨과 겹치는 라벨만 생략한다 (겹친 계열은 범례·툴팁·표로 구별) */
+    clear(f.gEnds);
+    var ends = [];
+    series.forEach(function (s) {
+      var last = s.values[WINDOW - 1];
+      if (last != null) ends.push({ s: s, v: last, y: y(last) });
+    });
+    ends.forEach(function (e) {
+      svgEl('circle', { cx: f.x(WINDOW - 1), cy: e.y, r: 4, fill: e.s.color, 'class': 'end-dot' }, f.gEnds);
+    });
+    ends.forEach(function (e) {
+      var alone = ends.every(function (o) { return o === e || Math.abs(o.y - e.y) >= 13; });
+      if (!alone) return;
+      var name = series.length >= 2 ? (e.s.label.length > 8 ? e.s.label.slice(0, 7) + '…' : e.s.label) + ' ' : '';
+      svgEl('text', { x: f.x(WINDOW - 1) + 9, y: e.y + 4, 'class': 'end-label' }, f.gEnds).textContent = name + ch.fmt(e.v);
+    });
+
+    if (ch.hover != null) showHover(ch);
+    if (!ch.tableEl.hidden) renderChartTable(ch);
+  }
+
+  function showHover(ch) {
+    var f = ch.frame, i = ch.hover;
+    if (!f || i == null || !ch.current) return;
+    var x = f.x(i);
+    f.cross.setAttribute('x1', x);
+    f.cross.setAttribute('x2', x);
+    f.cross.setAttribute('visibility', 'visible');
+
+    if (!tip) { tip = document.createElement('div'); tip.className = 'tooltip'; }
+    if (tip.parentNode !== ch.el) ch.el.appendChild(tip);
+    clear(tip);
+    var when = document.createElement('div');
+    when.className = 'when';
+    when.textContent = secondsAgo(i);
+    tip.appendChild(when);
+    ch.current.forEach(function (s) {
+      var row = document.createElement('div');
+      row.className = 'row';
+      var key = document.createElement('i');
+      key.className = 'key';
+      key.style.background = s.color;
+      var b = document.createElement('b');
+      b.textContent = ch.fmt(s.values[i]);
+      var name = document.createElement('span');
+      name.className = 'name';
+      name.textContent = s.label;
+      row.appendChild(key); row.appendChild(b); row.appendChild(name);
+      tip.appendChild(row);
+    });
+    /* 십자선이 오른쪽 절반에 있으면 툴팁을 왼쪽에 둔다: 최신 값(오른쪽 끝)을 가리지 않게 */
+    var px = ch.plotEl.offsetLeft + x;
+    var left = i > (WINDOW - 1) / 2 ? px - 12 - tip.offsetWidth : px + 12;
+    if (left + tip.offsetWidth > ch.el.clientWidth - 4) left = px - 12 - tip.offsetWidth;
+    tip.style.left = Math.max(4, left) + 'px';
+    tip.style.top = (ch.plotEl.offsetTop + 8) + 'px';
+  }
+  function hideHover(ch) {
+    if (ch.frame) ch.frame.cross.setAttribute('visibility', 'hidden');
+    if (tip && tip.parentNode === ch.el) ch.el.removeChild(tip);
+  }
+
+  /* 표로 보기: 최근 10초 (그래프와 같은 숫자) */
+  function renderChartTable(ch) {
+    if (ch.tableEl.hidden || !ch.current) return;
+    var table = document.createElement('table');
+    var head = table.createTHead().insertRow();
+    var th = document.createElement('th');
+    th.textContent = '시점';
+    head.appendChild(th);
+    ch.current.forEach(function (s) { var c = document.createElement('th'); c.textContent = s.label; head.appendChild(c); });
+    var body = table.createTBody();
+    for (var i = WINDOW - 1; i >= WINDOW - 10; i--) {
+      var row = body.insertRow();
+      row.insertCell().textContent = secondsAgo(i);
+      ch.current.forEach(function (s) { row.insertCell().textContent = ch.fmt(s.values[i]); });
+    }
+    clear(ch.tableEl);
+    ch.tableEl.appendChild(table);
+  }
+
+  /* ---------------- 요약 타일과 노드 표 ---------------- */
+
+  /* 노드 하나의 최근 5초: 창 안의 가장 오래된 통계 → 가장 최근 통계 */
+  function windowDelta(n) {
+    if (!n.up) return null;
+    var first = null;
+    for (var i = 0; i < n.recent.length; i++) if (n.recent[i]) { first = n.recent[i]; break; }
+    return counterDelta(first, n.recent[n.recent.length - 1]);
+  }
+
+  function setValue(id, text, unit) {
+    var el = document.getElementById(id);
+    el.textContent = text;
+    if (unit && text !== '–') {
+      var u = document.createElement('span');
+      u.className = 'unit';
+      u.textContent = unit;
+      el.appendChild(u);
+    }
+  }
+
+  function renderKpis() {
+    var agg = aggregate(nodes.map(windowDelta));
+    setValue('kpi-rps', agg ? fmtRate(agg.clientRate) : '–', '/s');
+    setValue('kpi-hit', fmtPct(hitRatio(agg)), '%');
+    setValue('kpi-origin', agg ? fmtRate(agg.originRate) : '–', '/s');
+    setValue('kpi-avg', fmtMs(avgLatencyUs(agg)), 'ms');
+    setValue('kpi-p95', fmtMs(agg && bounds ? percentileFromHist(bounds, agg.hist, 0.95) : null), 'ms');
+
+    /* 누적: 응답하는 노드들의 최신 통계를 더한다 */
+    var t = { client: 0, hits: 0, misses: 0, origin: 0, latCount: 0, latSumUs: 0 };
+    nodes.forEach(function (n) {
+      var s = n.up ? n.latest : null;
+      if (!s) return;
+      t.client += s.requests.client;
+      t.hits += sumKinds(s.outcomes, HIT_KINDS);
+      t.misses += sumKinds(s.outcomes, MISS_KINDS);
+      t.origin += s.origin_requests;
+      t.latCount += s.latency.client.count;
+      t.latSumUs += s.latency.client.sum_us;
+    });
+    document.getElementById('kpi-rps-note').textContent = '최근 5초 · 누적 ' + fmtCount(t.client) + '개';
+    document.getElementById('kpi-hit-note').textContent = '최근 5초 · 누적 ' +
+      (hitRatio(t) == null ? '–' : fmtPct(hitRatio(t)) + '%');
+    document.getElementById('kpi-origin-note').textContent = '최근 5초 · 누적 ' + fmtCount(t.origin) + '개' +
+      (t.client > 0 ? ' (요청의 ' + fmtPct(t.origin / t.client) + '%)' : '');
+    document.getElementById('kpi-avg-note').textContent = '최근 5초 · 누적 ' +
+      (avgLatencyUs(t) == null ? '–' : fmtMs(avgLatencyUs(t)) + 'ms');
+  }
+
+  function cell(row, text) { var c = row.insertCell(); c.textContent = text; return c; }
+
+  function renderNodeTable() {
+    var tbody = document.querySelector('#node-table tbody');
+    clear(tbody);
+    nodes.forEach(function (n) {
+      var row = tbody.insertRow();
+      var c0 = row.insertCell();
+      var sw = document.createElement('span');
+      sw.className = 'swatch';
+      sw.style.background = n.color;
+      c0.appendChild(sw);
+      c0.appendChild(document.createTextNode(n.name));
+      var s = n.up ? n.latest : null;
+      if (s && s.mode === 'standalone') {
+        var tag = document.createElement('span');
+        tag.className = 'tag';
+        tag.textContent = '독립';
+        c0.appendChild(tag);
+      }
+
+      /* 상태: 색만으로 구별하지 않도록 아이콘 + 글자 */
+      var c1 = row.insertCell();
+      c1.className = 'status-cell';
+      var st = document.createElement('span');
+      st.className = 'status';
+      var icon = document.createElement('span');
+      icon.className = 'icon';
+      icon.setAttribute('aria-hidden', 'true');
+      icon.textContent = n.up ? '●' : '✕';
+      icon.style.color = n.up ? cssVar('--status-good') : cssVar('--status-critical');
+      st.appendChild(icon);
+      st.appendChild(document.createTextNode(n.up ? '정상' : '응답 없음'));
+      c1.appendChild(st);
+
+      var a = aggregate([windowDelta(n)]);
+      cell(row, a ? fmtRate(a.clientRate) : '–');
+      cell(row, a ? fmtRate(a.handledRate) : '–');
+      cell(row, a ? fmtRate(a.forwardRate) : '–');
+      cell(row, a ? fmtRate(a.peerRate) : '–');
+      cell(row, hitRatio(a) == null ? '–' : fmtPct(hitRatio(a)) + '%');
+      var tot = s ? { hits: sumKinds(s.outcomes, HIT_KINDS), misses: sumKinds(s.outcomes, MISS_KINDS) } : null;
+      cell(row, hitRatio(tot) == null ? '–' : fmtPct(hitRatio(tot)) + '%');
+      cell(row, a ? fmtRate(a.originRate) : '–');
+      cell(row, fmtMs(avgLatencyUs(a)));
+      cell(row, fmtMs(a && bounds ? percentileFromHist(bounds, a.hist, 0.95) : null));
+
+      /* 캐시 사용: 같은 파랑 계열의 막대(옅은 트랙 위) + 글자 */
+      var cc = row.insertCell();
+      if (s && s.cache.enabled && s.cache.capacity > 0) {
+        var meter = document.createElement('span');
+        meter.className = 'meter';
+        var fill = document.createElement('i');
+        fill.style.width = Math.min(100, 100 * s.cache.bytes / s.cache.capacity).toFixed(1) + '%';
+        meter.appendChild(fill);
+        cc.appendChild(meter);
+        cc.appendChild(document.createTextNode(fmtBytes(s.cache.bytes) + ' / ' + fmtBytes(s.cache.capacity)));
+      } else {
+        cc.textContent = s ? '캐시 끔' : '–';
+      }
+      cell(row, s ? fmtCount(s.cache.objects) : '–');
+      cell(row, s ? fmtCount(s.cache.evictions) : '–');
+      cell(row, s ? fmtCount(s.peer_failures) : '–');
+    });
+  }
+
+  function modeLabel() {
+    var c = 0, sa = 0;
+    nodes.forEach(function (n) { if (n.latest) { if (n.latest.mode === 'cluster') c++; else sa++; } });
+    if (c > 0 && sa === 0) return '협력형 클러스터';
+    if (sa > 0 && c === 0) return '독립 프록시';
+    if (c > 0 && sa > 0) return '클러스터와 독립 프록시 혼합';
+    return '노드 확인 중';
+  }
+
+  function renderAll() {
+    var mode = modeLabel();
+    document.getElementById('title').textContent = mode === '독립 프록시' ? '프록시 관제' : '클러스터 관제';
+    document.getElementById('subtitle').textContent =
+      mode + ' · 노드 ' + nodes.length + '개 · 1초마다 갱신 · 그래프는 최근 60초';
+    charts.forEach(updateChart);
+    renderKpis();
+    renderNodeTable();
+  }
+
+  /* ---------------- 조회 ---------------- */
+
+  function poll() {
+    return Promise.all(nodes.map(function (n) { return fetchStats(n.url); })).then(function (snaps) {
+      var point = { nodes: {}, cluster: null }, deltas = [], up = 0;
+      snaps.forEach(function (snap, i) {
+        var n = nodes[i];
+        if (!snap) {
+          n.up = false;
+          point.nodes[n.key] = null;
+          n.recent.push(null);
+        } else {
+          up++;
+          n.up = true;
+          if (!bounds) bounds = snap.latency.bounds_us;
+          var d = counterDelta(n.last, snap);    /* 첫 조회면 null: 기준점만 잡는다 */
+          if (n.last && !d) n.recent = [];        /* 재시작: 최근 5초 창도 새로 시작 */
+          n.last = snap;
+          n.latest = snap;
+          point.nodes[n.key] = d;
+          if (d) deltas.push(d);
+          n.recent.push(snap);
+        }
+        if (n.recent.length > KPI_SPAN + 1) n.recent.shift();
+      });
+      point.cluster = aggregate(deltas);
+      history.push(point);
+      if (history.length > WINDOW) history.shift();
+
+      /* ?nodes=로 준 노드는 노드가 알려 준 이름으로 표시 */
+      var param = nodes.filter(function (n) { return n.fromParam; });
+      if (param.length) {
+        var names = displayNames(param.map(function (n) { return { key: n.key, reported: n.latest ? n.latest.node : '' }; }));
+        param.forEach(function (n, i) { n.name = names[i]; });
+      }
+      return up;
+    });
+  }
+
+  function showStatus(up) {
+    var line = document.getElementById('status-line');
+    var tail = ' · 응답한 노드 ' + up + '/' + nodes.length;
+    var now = new Date();
+    var hms = [now.getHours(), now.getMinutes(), now.getSeconds()].map(function (v) { return (v < 10 ? '0' : '') + v; }).join(':');
+    line.textContent = paused ? '일시정지 (조회는 계속합니다)' + tail : '마지막 갱신 ' + hms + tail;
+    wrap.classList.toggle('stale', up === 0);
+  }
+
+  var nextAt = 0;
+  function schedule() {
+    /* 1초 간격을 지킨다: 조회·그리기에 걸린 시간만큼 다음 대기를 줄인다 (최소 0.2초) */
+    var now = performance.now();
+    nextAt = Math.max(nextAt + POLL_MS, now + 200);
+    setTimeout(tick, nextAt - now);
+  }
+  function tick() {
+    poll().then(function (up) {
+      showStatus(up);
+      if (!paused) renderAll();
+    }).catch(function (e) {
+      console.error('관제 화면 갱신 오류:', e);
+    }).finally(schedule);
+  }
+
+  document.getElementById('pause').addEventListener('click', function (ev) {
+    paused = !paused;
+    frozen = paused ? history.slice() : null;
+    ev.currentTarget.textContent = paused ? '다시 시작' : '일시정지';
+    ev.currentTarget.setAttribute('aria-pressed', String(paused));
+    if (!paused) renderAll();
+  });
+
+  var resizeTimer = null;
+  window.addEventListener('resize', function () {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(function () { charts.forEach(updateChart); }, 150);
+  });
+  /* 다크 모드로 바뀌면 색을 다시 읽는다. 같은 노드는 같은 순번의 색을 유지한다 */
+  if (window.matchMedia) {
+    var mq = window.matchMedia('(prefers-color-scheme: dark)');
+    var onScheme = function () {
+      nodes.forEach(function (n, i) { n.color = nodeColor(i); });
+      renderAll();
+    };
+    if (mq.addEventListener) mq.addEventListener('change', onScheme);
+  }
+
+  /* ---------------- 시작 ---------------- */
+
+  buildChartCards();
+  var nodesParam = new URLSearchParams(location.search).get('nodes') || '';
+  fetchStats('/__stats').then(function (self) {
+    nodes = resolveNodes(nodesParam, self, location.hostname).map(function (n, i) {
+      n.color = nodeColor(i);
+      n.up = false; n.last = null; n.latest = null; n.recent = [];
+      return n;
+    });
+    if (!self && !nodesParam)
+      document.getElementById('status-line').textContent = '이 노드의 /__stats를 읽지 못했습니다';
+    renderAll();
+    nextAt = performance.now();
+    tick();
+  });
+})();
+</script>
+</body>
+</html>

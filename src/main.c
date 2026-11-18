@@ -66,6 +66,41 @@ static long long parse_size(const char *s)
     return *end == '\0' ? v : -1;
 }
 
+/* 관제 화면 파일(web/dashboard.html)을 찾아 절대 경로를 out에 넣는다. 못 찾으면 빈 문자열.
+ *   ① 현재 폴더 기준: 프로젝트 폴더에서 실행했을 때 (cluster.sh, VS Code 디버거)
+ *   ② 실행 파일 기준: build/<모드>/proxy 에서 두 단계 위 폴더 → 어디서 실행해도 찾는다 */
+static void find_dashboard(char *out, size_t cap)
+{
+    out[0] = '\0';
+    char *rp = realpath("web/dashboard.html", NULL);
+    if (rp != NULL) {
+        if (access(rp, R_OK) == 0 && strlen(rp) < cap)
+            memcpy(out, rp, strlen(rp) + 1);
+        free(rp);
+        if (out[0] != '\0')
+            return;
+    }
+
+    char exe[1024];
+    ssize_t n = readlink("/proc/self/exe", exe, sizeof exe - 1);   /* 실행 파일의 실제 경로 */
+    if (n <= 0)
+        return;
+    exe[n] = '\0';
+    for (int up = 0; up < 3; up++) {            /* .../coop-proxy/build/debug/proxy → .../coop-proxy */
+        char *slash = strrchr(exe, '/');
+        if (slash == NULL)
+            return;
+        *slash = '\0';
+    }
+    const char *suffix = "/web/dashboard.html";
+    if (strlen(exe) + strlen(suffix) >= cap)
+        return;
+    memcpy(out, exe, strlen(exe));
+    memcpy(out + strlen(exe), suffix, strlen(suffix) + 1);
+    if (access(out, R_OK) != 0)
+        out[0] = '\0';
+}
+
 /* 바이트 수를 사람이 읽기 좋게 */
 static void human_size(size_t b, char *out, size_t cap)
 {
@@ -220,6 +255,8 @@ int main(int argc, char *argv[])
         }
     }
 
+    find_dashboard(cfg.dashboard_path, sizeof cfg.dashboard_path);
+
     if (proxy_init(&cfg) < 0) {
         log_info("캐시를 만들 수 없습니다.");
         return 1;
@@ -290,6 +327,10 @@ int main(int argc, char *argv[])
     } else {
         log_info("독립 프록시 (클러스터 설정 없음)");
     }
+    if (cfg.dashboard_path[0] != '\0')
+        log_info("관제 화면: http://127.0.0.1:%d/__dashboard  (통계 JSON: /__stats)", cfg.port);
+    else
+        log_info("관제 화면 파일(web/dashboard.html)을 찾지 못했습니다. /__stats만 제공합니다.");
 
     unsigned long accepted = 0;
     for (;;) {
