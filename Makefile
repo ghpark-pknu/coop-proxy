@@ -6,6 +6,7 @@
 #  make MODE=tsan       데이터 경쟁 검사 → build/tsan/proxy
 #  make MODE=release    성능 측정용      → build/release/proxy
 #  make hello           환경 검증용 서버 → build/debug/hello_server
+#  make rtest           랑데부 해싱 단위 테스트 → build/debug/rendezvous_test
 #  make clean           build/ 폴더 전체 삭제
 #
 #  주의: 명령 줄(레시피)의 들여쓰기는 반드시 "탭" 문자여야 한다.
@@ -44,10 +45,10 @@ endif
 BUILD   := build/$(MODE)
 SRCS    := $(wildcard src/*.c)
 OBJS    := $(SRCS:src/%.c=$(BUILD)/%.o)
-DEPS    := $(OBJS:.o=.d) $(BUILD)/hello_server.d
+DEPS    := $(OBJS:.o=.d) $(BUILD)/hello_server.d $(BUILD)/tests/rendezvous_test.d
 TARGET  := $(BUILD)/proxy
 
-.PHONY: all hello clean
+.PHONY: all hello rtest clean
 
 ifeq ($(SRCS),)
 all:
@@ -70,8 +71,20 @@ hello: $(BUILD)/hello_server
 $(BUILD)/hello_server: sandbox/hello_server.c | $(BUILD)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $< $(LDLIBS)
 
+# 랑데부 해싱 단위 테스트: 테스트 코드 + router.o (네트워크 코드 없이 해시 함수만 검사)
+rtest: $(BUILD)/rendezvous_test
+
+$(BUILD)/rendezvous_test: $(BUILD)/tests/rendezvous_test.o $(BUILD)/router.o
+	$(CC) $(LDFLAGS) -o $@ $^ $(LDLIBS)
+
+$(BUILD)/tests/%.o: tests/%.c | $(BUILD)/tests
+	$(CC) $(CFLAGS) -c -o $@ $<
+
 # 결과물 폴더가 없으면 만든다 (| 뒤는 "순서만 보장하는" 재료)
 $(BUILD):
+	mkdir -p $@
+
+$(BUILD)/tests:
 	mkdir -p $@
 
 clean:

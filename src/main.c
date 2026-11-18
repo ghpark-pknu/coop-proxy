@@ -10,6 +10,7 @@
 #include "log.h"
 #include "net.h"
 #include "proxy.h"
+#include "router.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -39,6 +40,9 @@ static void usage(const char *prog)
             "  -o SIZE   캐시에 저장할 객체 하나의 상한 (기본 1M)\n"
             "  -v SEC    검증 주기, 초: 저장 후 이 시간이 지나면 원서버에 확인 (기본 60)\n"
             "  -b FILE   차단 목록 파일 (예: conf/blocklist.txt)\n"
+            "  -C FILE   노드 목록 파일 (예: conf/cluster.conf). 주면 클러스터 모드로 동작\n"
+            "            -n의 이름이 목록에 있어야 하고, -p를 생략하면 목록의 포트를 쓴다\n"
+            "  -r MS     연결에 실패한 노드를 건너뛰는 시간, 밀리초 (기본 5000)\n"
             "  -q        요청 기록을 출력하지 않음 (부하 실험용)\n"
             "  -h        도움말\n",
             prog);
@@ -93,17 +97,19 @@ static int parse_args(int argc, char *argv[], struct proxy_config *cfg)
     cfg->cache_capacity     = 64 * 1024 * 1024;
     cfg->max_object         = 1024 * 1024;
     cfg->validate_sec       = 60;
+    cfg->peer_retry_ms      = 5000;
     snprintf(cfg->node, sizeof cfg->node, "node1");
 
     long long size;
     int opt;
-    while ((opt = getopt(argc, argv, "p:n:c:t:s:o:v:b:qh")) != -1) {
+    while ((opt = getopt(argc, argv, "p:n:c:t:s:o:v:b:C:r:qh")) != -1) {
         switch (opt) {
         case 'p':
             if ((cfg->port = parse_int(optarg, 1, 65535)) < 0) {
                 fprintf(stderr, "잘못된 포트: %s\n", optarg);
                 return -1;
             }
+            cfg->port_given = 1;
             break;
         case 'n':
             snprintf(cfg->node, sizeof cfg->node, "%s", optarg);
@@ -142,6 +148,15 @@ static int parse_args(int argc, char *argv[], struct proxy_config *cfg)
             break;
         case 'b':
             snprintf(cfg->blocklist, sizeof cfg->blocklist, "%s", optarg);
+            break;
+        case 'C':
+            snprintf(cfg->cluster_conf, sizeof cfg->cluster_conf, "%s", optarg);
+            break;
+        case 'r':
+            if ((cfg->peer_retry_ms = parse_int(optarg, 100, 600000)) < 0) {
+                fprintf(stderr, "잘못된 재시도 간격: %s (100~600000)\n", optarg);
+                return -1;
+            }
             break;
         case 'q':
             cfg->quiet = 1;
@@ -188,6 +203,23 @@ int main(int argc, char *argv[])
         log_info("차단 목록 파일을 읽을 수 없습니다: %s", cfg.blocklist);
         return 1;
     }
+    /* 클러스터 모드: 노드 목록을 읽고, 이 노드의 포트를 목록과 맞춘다 */
+    if (cfg.cluster_conf[0] != '\0') {
+        char err[256];
+        if (router_load(cfg.cluster_conf, cfg.node, err, sizeof err) < 0) {
+            log_info("%s", err);
+            return 1;
+        }
+        const struct node *me = router_node(router_self());
+        if (!cfg.port_given) {
+            cfg.port = me->port;
+        } else if (cfg.port != me->port) {
+            log_info("-p %d가 %s에 적힌 %s의 포트 %d와 다릅니다.",
+                     cfg.port, cfg.cluster_conf, me->name, me->port);
+            return 1;
+        }
+    }
+
     if (proxy_init(&cfg) < 0) {
         log_info("캐시를 만들 수 없습니다.");
         return 1;
@@ -195,6 +227,13 @@ int main(int argc, char *argv[])
 
     /* 끊긴 연결에 쓰면 SIGPIPE가 와서 프로세스가 죽는다 → 무시하고 EPIPE 오류로 처리 */
     signal(SIGPIPE, SIG_IGN);
+
+    /* SIGINT·SIGTERM의 처리 방식을 기본값으로 되돌린다.
+     * 셸 스크립트에서 '명령 &'로 띄운 프로그램은 SIGINT가 "무시"로 설정된 채 시작된다
+     * (작업 제어가 없는 셸의 규칙). 리눅스는 막아 둔(blocked) 시그널을 무시 설정이어도
+     * 보관해 두지만, 이것은 표준이 보장하지 않으므로 명시적으로 되돌린다 */
+    signal(SIGINT, SIG_DFL);
+    signal(SIGTERM, SIG_DFL);
 
     /* SIGINT·SIGTERM 차단: 스레드를 만들기 "전에" 막아야 모든 스레드가 이 설정을 물려받는다 */
     sigset_t set;
@@ -233,6 +272,24 @@ int main(int argc, char *argv[])
     }
     if (filter_count() > 0)
         log_info("차단 목록 %zu개 (%s)", filter_count(), cfg.blocklist);
+    if (router_enabled()) {
+        char list[512] = "";
+        size_t len = 0;
+        for (int i = 0; i < router_count() && len < sizeof list; i++) {
+            const struct node *nd = router_node(i);
+            int w = snprintf(list + len, sizeof list - len, "%s%s(%s:%d%s)",
+                             i ? ", " : "", nd->name, nd->host, nd->port,
+                             i == router_self() ? ", 이 노드" : "");
+            if (w < 0)
+                break;
+            len += (size_t)w;
+        }
+        log_info("클러스터 노드 %d개: %s", router_count(), list);
+        log_info("담당 노드 연결 실패 시 2순위로 대체, 실패한 노드는 %dms 동안 건너뜀",
+                 cfg.peer_retry_ms);
+    } else {
+        log_info("독립 프록시 (클러스터 설정 없음)");
+    }
 
     unsigned long accepted = 0;
     for (;;) {

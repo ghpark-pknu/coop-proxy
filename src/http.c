@@ -251,7 +251,7 @@ static int is_client_conditional(const char *name)
         || strcasecmp(name, "If-None-Match") == 0;
 }
 
-int http_build_upstream_request(const struct http_request *req, const char *ims,
+int http_build_upstream_request(const struct http_request *req, const struct upstream_opts *o,
                                 char *out, size_t cap)
 {
     size_t n = 0;
@@ -266,21 +266,36 @@ int http_build_upstream_request(const struct http_request *req, const char *ims,
         n += (size_t)w;                                          \
     } while (0)
 
-    /* 원서버에는 HTTP/1.0 + Connection: close 로 요청한다.
-     * → 원서버가 응답을 다 보내면 연결을 닫으므로 "EOF = 응답 끝"으로 판단할 수 있다 */
-    APPEND("GET %s HTTP/1.0\r\n", req->path);
+    /* HTTP/1.0 + Connection: close 로 요청한다.
+     * → 상대가 응답을 다 보내면 연결을 닫으므로 "EOF = 응답 끝"으로 판단할 수 있다.
+     * 다른 노드는 프록시이므로 절대 URL 그대로, 원서버에는 경로만 보낸다 */
+    APPEND("GET %s HTTP/1.0\r\n", o->absolute ? req->target : req->path);
     if (req->port == 80)
         APPEND("Host: %s\r\n", req->host);
     else
         APPEND("Host: %s:%d\r\n", req->host, req->port);
     APPEND("Connection: close\r\n");
-    if (ims != NULL)
-        APPEND("If-Modified-Since: %s\r\n", ims);   /* 캐시 검증용 조건부 GET */
+    if (o->ims != NULL)
+        APPEND("If-Modified-Since: %s\r\n", o->ims);    /* 캐시 검증용 조건부 GET */
+
+    /* Via: 지금까지 거친 프록시 목록 뒤에 이 노드를 덧붙인다.
+     *   클라이언트 → node1 (HTTP/1.1로 받음) → node2 (HTTP/1.0으로 받음) → 원서버
+     *   원서버가 받는 값: "Via: 1.1 node1, 1.0 node2"
+     * req->version은 "HTTP/1.x"로 검증되어 있으므로 +5 하면 "1.x" */
+    if (o->via_name != NULL) {
+        APPEND("Via: ");
+        for (int i = 0; i < req->nheaders; i++)
+            if (strcasecmp(req->headers[i].name, "Via") == 0 && req->headers[i].value[0] != '\0')
+                APPEND("%s, ", req->headers[i].value);
+        APPEND("%s %s\r\n", req->version + 5, o->via_name);
+    }
 
     for (int i = 0; i < req->nheaders; i++) {
         const char *name = req->headers[i].name;
         if (is_hop_by_hop(name) || listed_in_connection(req, name) || is_client_conditional(name))
             continue;
+        if (o->via_name != NULL && strcasecmp(name, "Via") == 0)
+            continue;                                   /* 위에서 합쳐서 보냈다 */
         APPEND("%s: %s\r\n", name, req->headers[i].value);
     }
     APPEND("\r\n");

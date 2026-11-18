@@ -10,7 +10,7 @@ static pthread_mutex_t       g_lock = PTHREAD_MUTEX_INITIALIZER;
 static struct stats_snapshot g_stats;
 
 static const char *const NAMES[OUT_COUNT] = {
-    "HIT", "VALIDATED", "STALE", "MISS", "REFRESH", "BLOCKED", "ERROR",
+    "HIT", "VALIDATED", "STALE", "MISS", "REFRESH", "FORWARD", "BLOCKED", "ERROR",
 };
 
 const char *outcome_name(enum outcome o)
@@ -18,16 +18,18 @@ const char *outcome_name(enum outcome o)
     return ((unsigned)o < OUT_COUNT) ? NAMES[o] : "?";
 }
 
-void stats_record(enum outcome o, int origin_requests, long long bytes, long long ms)
+void stats_record(const struct stats_event *e)
 {
     pthread_mutex_lock(&g_lock);
-    g_stats.count[o]++;
+    g_stats.count[e->outcome]++;
     g_stats.requests++;
-    g_stats.origin_requests += (unsigned long)origin_requests;
-    g_stats.bytes  += (unsigned long long)bytes;
-    g_stats.sum_ms += (unsigned long long)ms;
-    if (ms > g_stats.max_ms)
-        g_stats.max_ms = ms;
+    g_stats.origin_requests += (unsigned long)e->origin_requests;
+    g_stats.peer_failures   += (unsigned long)e->peer_failures;
+    g_stats.from_peer       += (unsigned long)(e->from_peer != 0);
+    g_stats.bytes  += (unsigned long long)e->bytes;
+    g_stats.sum_ms += (unsigned long long)e->ms;
+    if (e->ms > g_stats.max_ms)
+        g_stats.max_ms = e->ms;
     pthread_mutex_unlock(&g_lock);
 }
 

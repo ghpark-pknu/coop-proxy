@@ -6,6 +6,7 @@
  *   2) 락 안에서는 메모리 작업만 한다. 소켓 송수신 같은 느린 일은 절대 하지 않는다.
  */
 #include "cache.h"
+#include "hash.h"
 
 #include <pthread.h>
 #include <stdint.h>
@@ -27,15 +28,10 @@ struct cache {
     unsigned long      evictions;
 };
 
-/* FNV-1a 해시: 바이트마다 XOR 후 소수를 곱한다. 짧은 코드로 고르게 퍼지는 해시 */
+/* 버킷 번호: URL의 FNV-1a 해시 (hash.h) */
 static uint64_t hash_str(const char *s)
 {
-    uint64_t h = 1469598103934665603ULL;        /* FNV offset basis */
-    while (*s) {
-        h ^= (unsigned char)*s++;
-        h *= 1099511628211ULL;                  /* FNV prime */
-    }
-    return h;
+    return hash_fnv1a(s);
 }
 
 /* 객체가 차지하는 바이트: 응답 크기 + URL 길이 */

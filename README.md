@@ -38,6 +38,19 @@ python3 tools/origin.py --port 9000             # 터미널 A: 원서버
 curl -i -x http://127.0.0.1:8080 http://127.0.0.1:9000/page.html   # 터미널 C (X-Cache 확인)
 ./scripts/test_stage1.sh                        # 1단계(중계) 자동 점검
 ./scripts/test_stage2.sh                        # 2단계(캐시) 자동 점검
+./scripts/test_stage3.sh                        # 3단계(클러스터) 자동 점검
+```
+
+### 클러스터 (미니 CDN)
+
+```bash
+./scripts/cluster.sh start                      # 원서버 + node1·node2·node3 (conf/cluster.conf)
+./build/debug/rendezvous_test rank http://127.0.0.1:9000/obj/0000.bin   # 담당 노드 확인
+curl -i -x http://127.0.0.1:8081 http://127.0.0.1:9000/obj/0000.bin    # X-Cache 경로 확인
+./scripts/cluster.sh stop node2                 # 장애 시험
+./scripts/cluster.sh stop                       # 전체 종료 (노드별 통계 출력)
+CLUSTER=0 ./scripts/cluster.sh start            # 비교용: 독립 프록시 3개
+make rtest && ./build/debug/rendezvous_test     # 랑데부 해싱 단위 테스트·분포·재배치 비교
 ```
 
 | 옵션 | 뜻 | 기본값 |
@@ -50,6 +63,8 @@ curl -i -x http://127.0.0.1:8080 http://127.0.0.1:9000/page.html   # 터미널 C
 | `-o SIZE` | 객체 하나의 상한 | 1M |
 | `-v SEC` | 검증 주기 | 60 |
 | `-b FILE` | 차단 목록 | 없음 |
+| `-C FILE` | 노드 목록 (주면 클러스터 모드, `-n` 이름이 목록에 있어야 함) | 없음 |
+| `-r MS` | 연결 실패한 노드를 건너뛰는 시간 | 5000 |
 | `-q` | 요청 기록 끄기 | 꺼짐 |
 
 ## 개발 환경

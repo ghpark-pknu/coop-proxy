@@ -17,6 +17,9 @@ struct proxy_config {
     size_t max_object;            /* 캐시에 저장할 객체 하나의 상한(바이트) */
     int    validate_sec;          /* 검증 주기: 저장 후 이 시간이 지나면 원서버에 확인 */
     char   blocklist[256];        /* 차단 목록 파일 경로 (없으면 빈 문자열) */
+    char   cluster_conf[256];     /* 노드 목록 파일 경로 (없으면 독립 프록시) */
+    int    port_given;            /* -p를 직접 지정했는가 (클러스터 모드에서 포트 확인용) */
+    int    peer_retry_ms;         /* 연결에 실패한 노드를 다시 시도하기까지 건너뛰는 시간 */
 };
 
 /* 작업 스레드에 넘기는 연결 정보 (메인 스레드가 malloc, 작업 스레드가 free) */

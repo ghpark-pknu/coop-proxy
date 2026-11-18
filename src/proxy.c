@@ -1,19 +1,24 @@
 /*
  * proxy.c — 요청 하나의 처리 흐름
  *
- * 계획서의 흐름도 (2단계까지 구현)
+ * 계획서의 흐름도 (3단계까지 구현)
  *   ① 요청 수신·파싱 ─────────────── 실패 → 400
  *   ② 관제 요청(/__stats 등)? ─────── 4단계에서 구현 (지금은 501)
  *   ③ GET이 아님 (CONNECT 포함) ───── 501
  *   ④ 차단 목록에 있음 ─────────────── 403
- *   ⑤ CDN 라우터 ──────────────────── 3단계
+ *   ⑤ CDN 라우터: 랑데부 해싱으로 담당 노드 결정
+ *      ├ 다른 노드가 넘겨준 요청 (Via에 클러스터 노드가 있음) → ⑥ (다시 넘기지 않음: 루프 방지)
+ *      ├ 담당(1순위)이 이 노드 → ⑥
+ *      ├ 담당이 다른 노드 → Via를 덧붙여 전달 → 받은 응답을 중계              [FORWARD]
+ *      │    └ 연결 실패 → 2순위로: 이 노드면 ⑥, 다른 노드면 전달               [FORWARD]
+ *      │         └ 2순위도 실패 → 이 노드가 ⑥에서 직접 처리
  *   ⑥ 캐시 조회
- *      ├ HIT, 검증 주기 이내 → 캐시로 바로 응답                         [HIT]
+ *      ├ HIT, 검증 주기 이내 → 캐시로 바로 응답                              [HIT]
  *      ├ HIT, 검증 주기 지남 → If-Modified-Since로 원서버 확인
- *      │    ├ 304 → 저장 시각 갱신 후 캐시로 응답                        [VALIDATED]
- *      │    ├ 200 → 새 응답을 중계하고 캐시 교체                         [REFRESH]
- *      │    └ 원서버 연결 실패 → 오래된 캐시로 응답                      [STALE]
- *      └ MISS → 원서버 요청 → 중계 → 저장 가능하면 저장                  [MISS]
+ *      │    ├ 304 → 저장 시각 갱신 후 캐시로 응답                             [VALIDATED]
+ *      │    ├ 200 → 새 응답을 중계하고 캐시 교체                              [REFRESH]
+ *      │    └ 원서버 연결 실패 → 오래된 캐시로 응답                           [STALE]
+ *      └ MISS → 원서버 요청 → 중계 → 저장 가능하면 저장                       [MISS]
  *   ⑦ 통계 갱신, 기록 → 연결 종료
  */
 #include "proxy.h"
@@ -22,6 +27,7 @@
 #include "http.h"
 #include "log.h"
 #include "net.h"
+#include "router.h"
 #include "stats.h"
 
 #include <errno.h>
@@ -33,7 +39,7 @@
 #include <sys/uio.h>
 #include <unistd.h>
 
-#define RELAY_BUF 65536     /* 원서버 → 클라이언트 중계 버퍼 (64KB) */
+#define RELAY_BUF 65536     /* 위 → 클라이언트 중계 버퍼 (64KB) */
 
 /* 설정과 캐시 포인터는 스레드를 만들기 전에 한 번 쓰고 이후로는 읽기만 한다 */
 static struct proxy_config g_cfg;
@@ -62,12 +68,13 @@ int  proxy_active_conns(void) { return atomic_load(&g_active); }
 static void reply_error(int cfd, struct req_log *lg, int status, const char *detail)
 {
     http_send_error(cfd, status, detail);
-    lg->status = status;
+    lg->status  = status;
     lg->outcome = (status == 403) ? OUT_BLOCKED : OUT_ERROR;
 }
 
 /* data(응답 원문)를 보내되, 상태 줄 바로 뒤에 "X-Cache: 결과 from 노드" 헤더를 끼운다.
- * 세 조각을 writev 방식으로 한 번에 보낸다. 성공 0, 실패 -1 */
+ * 세 조각을 sendmsg 한 번으로 보낸다 (작은 조각을 따로 보내면 Nagle 알고리즘 때문에
+ * 지연될 수 있다). 성공 0, 실패 -1 */
 static int send_with_xcache(int fd, const char *data, size_t len, const char *label)
 {
     const char *nl = memchr(data, '\n', len);
@@ -79,9 +86,9 @@ static int send_with_xcache(int fd, const char *data, size_t len, const char *la
     int hlen = snprintf(hdr, sizeof hdr, "X-Cache: %s from %s\r\n", label, g_cfg.node);
 
     struct iovec iov[3] = {
-        { (void *)data,         first       },
-        { hdr,                  (size_t)hlen },
-        { (void *)(data + first), len - first },
+        { (void *)data,           first        },
+        { hdr,                    (size_t)hlen },
+        { (void *)(data + first), len - first  },
     };
     return net_writev_all(fd, iov, 3);
 }
@@ -99,22 +106,9 @@ static void serve_from_cache(int cfd, const struct cache_obj *o, struct req_log 
 }
 
 /* ------------------------------------------------------------------ */
-/* 원서버에서 받아 중계하기                                             */
+/* 캐시에 넣을 사본 모으기                                              */
 /* ------------------------------------------------------------------ */
 
-enum fetch_kind {
-    FETCH_RELAYED,        /* 응답을 클라이언트에 중계했다 (끝까지 또는 중간에 끊김) */
-    FETCH_NOT_MODIFIED,   /* 조건부 요청에 304: 클라이언트에는 아무것도 보내지 않았다 */
-    FETCH_FAILED          /* 연결·전송·수신 실패: 클라이언트에는 아무것도 보내지 않았다 */
-};
-
-struct fetch_result {
-    enum fetch_kind kind;
-    int             error_status;   /* FETCH_FAILED일 때 보낼 상태 코드 (502, 504) */
-    const char     *error_detail;
-};
-
-/* 캐시에 넣을 응답 사본을 모으는 버퍼 */
 struct collector {
     char  *buf;
     size_t len, cap, limit;
@@ -151,7 +145,7 @@ static void collect(struct collector *col, const char *data, size_t n)
     col->len += n;
 }
 
-/* 다 모은 응답이 캐시에 넣을 수 있는 것이면 넣는다 */
+/* 다 모은 응답이 캐시에 넣을 수 있는 것이면 넣는다. 어느 쪽이든 col->buf는 비워진다 */
 static void store_if_cacheable(struct collector *col, const char *url)
 {
     struct http_response_info ri;
@@ -161,61 +155,89 @@ static void store_if_cacheable(struct collector *col, const char *url)
              && !ri.no_store                                       /* 저장 금지 아님 */
              && (ri.content_length < 0                             /* 본문이 다 왔는가 */
                  || (long long)(col->len - ri.head_len) == ri.content_length);
-    if (ok) {
+    if (ok)
         cache_insert(g_cache, url, col->buf, col->len, ri.last_modified, net_now_ms());
-        col->buf = NULL;            /* 소유권이 캐시로 넘어갔다 */
-    } else {
+    else
         free(col->buf);
-        col->buf = NULL;
-    }
+    col->buf = NULL;        /* 저장했으면 소유권이 캐시로 넘어갔고, 아니면 해제했다 */
 }
 
-/* 원서버에 요청을 보내고 응답을 클라이언트에 중계한다.
- *   ims   : NULL이 아니면 If-Modified-Since 조건부 요청
- *   label : 클라이언트에 보낼 X-Cache 값 ("MISS" 또는 "REFRESH")
- * 실패(FETCH_FAILED)했을 때 오류 응답은 호출한 쪽이 결정한다.
- * (검증 실패라면 오류 대신 오래된 캐시로 응답할 수 있으므로) */
-static struct fetch_result fetch_and_relay(int cfd, const struct http_request *req,
-                                           const char *ims, const char *label,
-                                           struct req_log *lg)
-{
-    struct fetch_result fr = { FETCH_FAILED, 502, "원서버에 연결할 수 없습니다." };
+/* ------------------------------------------------------------------ */
+/* 위(원서버 또는 다른 노드)에 요청하고 응답을 중계하기                   */
+/* ------------------------------------------------------------------ */
 
-    char out[HTTP_MAX_HEAD + 512];
-    int olen = http_build_upstream_request(req, ims, out, sizeof out);
+enum up_kind {
+    UP_RELAYED,         /* 응답을 클라이언트에 중계했다 (끝까지 또는 중간에 끊김) */
+    UP_NOT_MODIFIED,    /* 조건부 요청에 304: 클라이언트에는 아무것도 보내지 않았다 */
+    UP_FAILED,          /* 연결·전송·수신 실패: 클라이언트에는 아무것도 보내지 않았다 */
+    UP_BAD_REQUEST      /* 보낼 요청을 만들 수 없음 (헤더가 너무 김): 연결하지 않았다 */
+};
+
+struct up_result {
+    enum up_kind kind;
+    int          error_status;  /* UP_FAILED·UP_BAD_REQUEST일 때 보낼 상태 코드 */
+    const char  *error_detail;
+    int          complete;      /* UP_RELAYED: 응답을 EOF까지 다 받아 중계했는가 */
+};
+
+struct up_target {
+    const char       *host;
+    int               port;
+    int               absolute;         /* 1: 다른 노드(프록시)에게 절대 URL로 요청 */
+    int               io_timeout_ms;
+    const char       *ims;              /* NULL이 아니면 If-Modified-Since 조건부 요청 */
+    const char       *label;            /* 클라이언트에 보낼 X-Cache 값 */
+    struct collector *col;              /* 캐시용 사본을 모을 곳 (NULL이면 모으지 않음) */
+};
+
+/* t가 가리키는 곳에 요청을 보내고, 응답을 클라이언트에 중계한다.
+ * 실패했을 때(UP_FAILED) 어떻게 할지는 호출한 쪽이 정한다.
+ *   - 원서버 MISS라면 502·504 오류 응답
+ *   - 원서버 검증이라면 갖고 있던 사본으로 응답 (STALE)
+ *   - 다른 노드라면 다음 순위 노드로 (장애 대체)
+ * 이것이 가능한 것은 "응답의 첫 줄을 다 받기 전에는 클라이언트에 아무것도 보내지 않기"
+ * 때문이다. 일단 보내기 시작하면 되돌릴 수 없다. */
+static struct up_result relay_upstream(int cfd, const struct http_request *req,
+                                       const struct up_target *t, struct req_log *lg)
+{
+    struct up_result r = { UP_FAILED, 502, "원서버에 연결할 수 없습니다.", 0 };
+
+    char out[HTTP_MAX_HEAD + 1024];
+    struct upstream_opts opts = { t->absolute, t->ims, g_cfg.node };
+    int olen = http_build_upstream_request(req, &opts, out, sizeof out);
     if (olen < 0) {
-        fr.error_status = 400;
-        fr.error_detail = "요청 헤더가 너무 깁니다.";
-        return fr;
+        r.kind = UP_BAD_REQUEST;
+        r.error_status = 400;
+        r.error_detail = "요청 헤더가 너무 깁니다.";
+        return r;
     }
 
     /* 1) 연결 */
-    lg->origin_reqs++;
-    int ofd = net_connect(req->host, req->port, g_cfg.connect_timeout_ms);
-    if (ofd == NET_ERR_TIMEOUT) {
-        fr.error_status = 504;
-        fr.error_detail = "원서버 연결 시간이 초과되었습니다.";
-        return fr;
+    int ufd = net_connect(t->host, t->port, g_cfg.connect_timeout_ms);
+    if (ufd < 0) {
+        if (ufd == NET_ERR_TIMEOUT) {
+            r.error_status = 504;
+            r.error_detail = "원서버 연결 시간이 초과되었습니다.";
+        } else if (ufd == NET_ERR_RESOLVE) {
+            r.error_detail = "원서버 주소를 찾을 수 없습니다.";
+        }
+        return r;
     }
-    if (ofd < 0) {
-        if (ofd == NET_ERR_RESOLVE)
-            fr.error_detail = "원서버 주소를 찾을 수 없습니다.";
-        return fr;
-    }
-    net_set_timeouts(ofd, g_cfg.io_timeout_ms);
+    net_set_timeouts(ufd, t->io_timeout_ms);
 
     /* 2) 요청 전송 */
-    if (net_write_all(ofd, out, (size_t)olen) < 0) {
-        fr.error_detail = "원서버에 요청을 보내지 못했습니다.";
-        close(ofd);
-        return fr;
+    if (net_write_all(ufd, out, (size_t)olen) < 0) {
+        r.error_detail = "원서버에 요청을 보내지 못했습니다.";
+        close(ufd);
+        return r;
     }
 
-    /* 3) 상태 줄을 다 받을 때까지 읽는다 (304인지 보고 나서 중계 여부를 정해야 하므로) */
+    /* 3) 상태 줄을 다 받을 때까지 읽는다.
+     *    304인지 확인해야 하고, X-Cache를 상태 줄 뒤에 끼워야 하기 때문이다 */
     char buf[RELAY_BUF];
     size_t have = 0;
     while (memchr(buf, '\n', have) == NULL && have < sizeof buf) {
-        ssize_t n = recv(ofd, buf + have, sizeof buf - have, 0);
+        ssize_t n = recv(ufd, buf + have, sizeof buf - have, 0);
         if (n > 0) {
             have += (size_t)n;
             continue;
@@ -223,40 +245,39 @@ static struct fetch_result fetch_and_relay(int cfd, const struct http_request *r
         if (n < 0 && errno == EINTR)
             continue;
         if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-            fr.error_status = 504;
-            fr.error_detail = "원서버 응답 시간이 초과되었습니다.";
+            r.error_status = 504;
+            r.error_detail = "원서버 응답 시간이 초과되었습니다.";
         } else {
-            fr.error_detail = (n == 0 && have == 0) ? "원서버가 빈 응답을 보냈습니다."
-                                                    : "원서버 응답을 받지 못했습니다.";
+            r.error_detail = (n == 0 && have == 0) ? "원서버가 빈 응답을 보냈습니다."
+                                                   : "원서버 응답을 받지 못했습니다.";
         }
-        close(ofd);
-        return fr;
+        close(ufd);
+        return r;
     }
 
     int status = http_parse_status(buf, have);
-    if (ims != NULL && status == 304) {
-        close(ofd);                         /* 바뀌지 않음 → 캐시 사본을 쓰면 된다 */
-        fr.kind = FETCH_NOT_MODIFIED;
-        return fr;
+    if (t->ims != NULL && status == 304) {
+        close(ufd);                         /* 바뀌지 않음 → 캐시 사본을 쓰면 된다 */
+        r.kind = UP_NOT_MODIFIED;
+        return r;
     }
 
-    /* 4) 중계 시작: 첫 조각에는 X-Cache 헤더를 끼운다. 동시에 캐시용 사본을 모은다 */
-    fr.kind = FETCH_RELAYED;
+    /* 4) 여기서부터 클라이언트에 보내기 시작한다 (되돌릴 수 없음) */
+    r.kind = UP_RELAYED;
     lg->status = status;
-
-    struct collector col = { NULL, 0, 0, g_cache ? cache_max_object(g_cache) : 0, g_cache != NULL };
-    collect(&col, buf, have);
+    if (t->col != NULL)
+        collect(t->col, buf, have);
 
     long long sent = 0;
-    int complete = 0;
-    if (send_with_xcache(cfd, buf, have, label) < 0) {
+    if (send_with_xcache(cfd, buf, have, t->label) < 0) {
         lg->note = "CLIENT_GONE";
     } else {
         sent += (long long)have;
         for (;;) {
-            ssize_t n = recv(ofd, buf, sizeof buf, 0);
+            ssize_t n = recv(ufd, buf, sizeof buf, 0);
             if (n > 0) {
-                collect(&col, buf, (size_t)n);
+                if (t->col != NULL)
+                    collect(t->col, buf, (size_t)n);
                 if (net_write_all(cfd, buf, (size_t)n) < 0) {
                     lg->note = "CLIENT_GONE";
                     break;
@@ -265,41 +286,58 @@ static struct fetch_result fetch_and_relay(int cfd, const struct http_request *r
                 continue;
             }
             if (n == 0) {                   /* EOF = 응답 끝 */
-                complete = 1;
+                r.complete = 1;
                 break;
             }
             if (errno == EINTR)
                 continue;
             /* 이미 응답 일부를 보냈으므로 상태 코드를 바꿀 수 없다 → 끊는다 */
-            lg->note = (errno == EAGAIN || errno == EWOULDBLOCK) ? "ORIGIN_TIMEOUT" : "ORIGIN_ERROR";
+            lg->note = (errno == EAGAIN || errno == EWOULDBLOCK) ? "UPSTREAM_TIMEOUT" : "UPSTREAM_ERROR";
             break;
         }
     }
-    close(ofd);
+    close(ufd);
     lg->bytes = sent;
+    return r;
+}
 
-    /* 5) 끝까지 받은 응답만 캐시에 넣는다 (중간에 끊긴 응답은 버림) */
-    if (complete)
-        store_if_cacheable(&col, req->target);
+/* 원서버에서 받아 중계하고, 캐시가 켜져 있으면 저장까지 한다 */
+static struct up_result fetch_origin(int cfd, const struct http_request *req, const char *ims,
+                                     const char *label, struct req_log *lg)
+{
+    struct collector col = { NULL, 0, 0, g_cache ? cache_max_object(g_cache) : 0, g_cache != NULL };
+    struct up_target t = {
+        .host = req->host, .port = req->port, .absolute = 0,
+        .io_timeout_ms = g_cfg.io_timeout_ms, .ims = ims, .label = label,
+        .col = g_cache ? &col : NULL,
+    };
+
+    struct up_result r = relay_upstream(cfd, req, &t, lg);
+    if (r.kind != UP_BAD_REQUEST)
+        lg->origin_reqs++;              /* 원서버에 연결을 시도했다 */
+
+    if (r.kind == UP_RELAYED && r.complete)
+        store_if_cacheable(&col, req->target);  /* 끝까지 받은 응답만 저장 */
     else
         free(col.buf);
-    return fr;
+    return r;
 }
 
 /* ------------------------------------------------------------------ */
-/* ⑥ 캐시 조회와 처리                                                   */
+/* ⑥ 이 노드에서 처리: 캐시 조회 → 원서버                               */
 /* ------------------------------------------------------------------ */
 
-static void handle_get(int cfd, const struct http_request *req, struct req_log *lg)
+static void handle_local(int cfd, const struct http_request *req, struct req_log *lg)
 {
     long long ttl_ms = (long long)g_cfg.validate_sec * 1000;
+    struct up_result r;
 
     /* 캐시 끔: 매번 원서버로 */
     if (g_cache == NULL) {
         lg->outcome = OUT_MISS;
-        struct fetch_result fr = fetch_and_relay(cfd, req, NULL, "MISS", lg);
-        if (fr.kind == FETCH_FAILED)
-            reply_error(cfd, lg, fr.error_status, fr.error_detail);
+        r = fetch_origin(cfd, req, NULL, "MISS", lg);
+        if (r.kind == UP_FAILED || r.kind == UP_BAD_REQUEST)
+            reply_error(cfd, lg, r.error_status, r.error_detail);
         return;
     }
 
@@ -316,13 +354,15 @@ static void handle_get(int cfd, const struct http_request *req, struct req_log *
     /* 검증 주기가 지남 + Last-Modified가 있음 → 조건부 GET으로 확인 */
     if (obj != NULL && obj->last_modified[0] != '\0') {
         lg->outcome = OUT_REFRESH;
-        struct fetch_result fr = fetch_and_relay(cfd, req, obj->last_modified, "REFRESH", lg);
-        if (fr.kind == FETCH_NOT_MODIFIED) {
+        r = fetch_origin(cfd, req, obj->last_modified, "REFRESH", lg);
+        if (r.kind == UP_NOT_MODIFIED) {
             cache_refresh(g_cache, obj, net_now_ms());
             serve_from_cache(cfd, obj, lg, OUT_VALIDATED);
-        } else if (fr.kind == FETCH_FAILED) {
+        } else if (r.kind == UP_FAILED) {
             /* 원서버에 확인할 수 없음 → 오류 대신 갖고 있던 사본으로 응답 (가용성 우선) */
             serve_from_cache(cfd, obj, lg, OUT_STALE);
+        } else if (r.kind == UP_BAD_REQUEST) {
+            reply_error(cfd, lg, r.error_status, r.error_detail);
         }
         cache_release(g_cache, obj);
         return;
@@ -332,9 +372,98 @@ static void handle_get(int cfd, const struct http_request *req, struct req_log *
     if (obj != NULL)
         cache_release(g_cache, obj);
     lg->outcome = OUT_MISS;
-    struct fetch_result fr = fetch_and_relay(cfd, req, NULL, "MISS", lg);
-    if (fr.kind == FETCH_FAILED)
-        reply_error(cfd, lg, fr.error_status, fr.error_detail);
+    r = fetch_origin(cfd, req, NULL, "MISS", lg);
+    if (r.kind == UP_FAILED || r.kind == UP_BAD_REQUEST)
+        reply_error(cfd, lg, r.error_status, r.error_detail);
+}
+
+/* ------------------------------------------------------------------ */
+/* ⑤ CDN 라우터                                                         */
+/* ------------------------------------------------------------------ */
+
+/* 다른 노드에게 요청을 넘기고 받은 응답을 중계한다 (이 노드는 저장하지 않는다) */
+static struct up_result forward_to_peer(int cfd, const struct http_request *req,
+                                        const struct node *nd, struct req_log *lg)
+{
+    struct up_target t = {
+        .host = nd->host, .port = nd->port, .absolute = 1,
+        /* 받는 노드는 원서버 연결(-c)과 응답 대기(-t)를 다 기다린 뒤에야 502·504를
+         * 보낼 수 있다. 그 오류 응답보다 먼저 포기하지 않도록 여유를 더 준다 */
+        .io_timeout_ms = g_cfg.io_timeout_ms + g_cfg.connect_timeout_ms + 1000,
+        .ims = NULL, .label = "FORWARD", .col = NULL,
+    };
+    return relay_upstream(cfd, req, &t, lg);
+}
+
+/* names 뒤에 이름 하나를 덧붙인다 ("node2" → "node2,node3") */
+static void append_name(char *names, size_t cap, const char *name)
+{
+    size_t len = strlen(names);
+    snprintf(names + len, cap - len, "%s%s", len ? "," : "", name);
+}
+
+/* 이 요청을 다른 노드가 처리했으면 1, 이 노드가 ⑥에서 처리해야 하면 0 */
+static int route_request(int cfd, const struct http_request *req, struct req_log *lg)
+{
+    if (!router_enabled())
+        return 0;                                   /* 독립 프록시 */
+
+    /* 다른 노드가 넘겨준 요청은 다시 넘기지 않는다 (루프 방지) */
+    int from = router_via_peer(req);
+    if (from >= 0) {
+        lg->from_peer = 1;
+        snprintf(lg->route, sizeof lg->route, "←%s", router_node(from)->name);
+        return 0;
+    }
+
+    int order[ROUTER_MAX_NODES];
+    int n = router_rank(req->target, order, NULL);
+    int self = router_self();
+    char failed[2 * ROUTER_NAME_MAX + 2] = "";     /* 연결하지 못한 노드 이름들 */
+
+    /* 1순위(담당), 2순위(대체)까지만 시도한다 */
+    for (int i = 0; i < n && i < 2; i++) {
+        int idx = order[i];
+        if (idx == self) {
+            if (i > 0)
+                snprintf(lg->route, sizeof lg->route, "대체 (%s 연결 불가)", failed);
+            return 0;                               /* 이 노드가 담당 또는 대체 담당 */
+        }
+
+        const struct node *nd = router_node(idx);
+        if (!router_available(idx, net_now_ms())) {  /* 최근에 실패해서 건너뛰는 중 */
+            append_name(failed, sizeof failed, nd->name);
+            continue;
+        }
+
+        struct up_result r = forward_to_peer(cfd, req, nd, lg);
+        if (r.kind == UP_BAD_REQUEST) {
+            reply_error(cfd, lg, r.error_status, r.error_detail);
+            return 1;
+        }
+        if (r.kind == UP_RELAYED) {
+            if (router_mark_up(idx))
+                log_info("%s 복구: 다시 요청을 넘깁니다.", nd->name);
+            lg->outcome = OUT_FORWARD;
+            if (failed[0])
+                snprintf(lg->route, sizeof lg->route, "→%s (%s 연결 불가)", nd->name, failed);
+            else
+                snprintf(lg->route, sizeof lg->route, "→%s", nd->name);
+            return 1;
+        }
+
+        /* UP_FAILED: 응답을 한 바이트도 받기 전에 실패 → 클라이언트에 보낸 것이 없으므로
+         * 다음 순위로 넘어갈 수 있다 */
+        lg->peer_failures++;
+        if (router_mark_down(idx, net_now_ms(), g_cfg.peer_retry_ms))
+            log_info("%s(%s:%d)에 요청을 넘길 수 없습니다. %dms 동안 건너뜁니다.",
+                     nd->name, nd->host, nd->port, g_cfg.peer_retry_ms);
+        append_name(failed, sizeof failed, nd->name);
+    }
+
+    /* 1·2순위가 모두 다른 노드이고 둘 다 실패 → 이 노드가 직접 처리 */
+    snprintf(lg->route, sizeof lg->route, "직접 (%s 연결 불가)", failed);
+    return 0;
 }
 
 /* ------------------------------------------------------------------ */
@@ -352,7 +481,7 @@ void *proxy_handle_connection(void *arg)
     long long t0 = net_now_ms();
     struct req_log lg = {
         .client = client, .method = "-", .target = "-",
-        .status = 0, .bytes = 0, .ms = 0, .outcome = OUT_ERROR, .note = NULL, .origin_reqs = 0,
+        .outcome = OUT_ERROR,       /* 나머지 필드는 0 / NULL / 빈 문자열 */
     };
 
     net_set_timeouts(cfd, g_cfg.io_timeout_ms);
@@ -403,15 +532,21 @@ void *proxy_handle_connection(void *arg)
         goto out;
     }
 
-    /* ⑤ CDN 라우터 (3단계) */
-
-    /* ⑥ 캐시 조회 → 응답 */
-    handle_get(cfd, &req, &lg);
+    /* ⑤ CDN 라우터 → ⑥ 이 노드에서 처리 */
+    if (!route_request(cfd, &req, &lg))
+        handle_local(cfd, &req, &lg);
 
 out:
     /* ⑦ 통계와 기록 (lg.method, lg.target은 head를 가리키므로 함수가 끝나기 전에) */
     lg.ms = net_now_ms() - t0;
-    stats_record(lg.outcome, lg.origin_reqs, lg.bytes, lg.ms);
+    {
+        struct stats_event ev = {
+            .outcome = lg.outcome, .origin_requests = lg.origin_reqs,
+            .peer_failures = lg.peer_failures, .from_peer = lg.from_peer,
+            .bytes = lg.bytes, .ms = lg.ms,
+        };
+        stats_record(&ev);
+    }
     log_request(&lg);
 out_quiet:
     close(cfd);
@@ -437,13 +572,17 @@ void proxy_report(void)
     stats_get(&s);
 
     log_info("통계: 요청 %lu | HIT %lu, VALIDATED %lu, STALE %lu, MISS %lu, REFRESH %lu, "
-             "BLOCKED %lu, ERROR %lu",
+             "FORWARD %lu, BLOCKED %lu, ERROR %lu",
              s.requests, s.count[OUT_HIT], s.count[OUT_VALIDATED], s.count[OUT_STALE],
-             s.count[OUT_MISS], s.count[OUT_REFRESH], s.count[OUT_BLOCKED], s.count[OUT_ERROR]);
+             s.count[OUT_MISS], s.count[OUT_REFRESH], s.count[OUT_FORWARD],
+             s.count[OUT_BLOCKED], s.count[OUT_ERROR]);
     log_info("통계: 히트율 %.1f%% | 원서버 요청 %lu | 평균 응답 %.1fms (최대 %lldms) | 전송 %.1fMB",
              stats_hit_ratio(&s) * 100.0, s.origin_requests,
              s.requests ? (double)s.sum_ms / (double)s.requests : 0.0, s.max_ms,
              (double)s.bytes / (1024.0 * 1024.0));
+    if (router_enabled())
+        log_info("클러스터: 넘긴 요청 %lu | 넘겨받은 요청 %lu | 다른 노드 연결 실패 %lu회",
+                 s.count[OUT_FORWARD], s.from_peer, s.peer_failures);
 
     if (g_cache != NULL) {
         struct cache_usage u;

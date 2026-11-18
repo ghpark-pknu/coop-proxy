@@ -22,6 +22,25 @@
             ]
         },
         {
+            "name": "proxy 디버그 (클러스터 node1)",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/build/debug/proxy",
+            // node2·node3과 원서버는 터미널에서 띄운다:
+            //   ./scripts/cluster.sh start origin node2 node3
+            "args": ["-n", "node1", "-C", "conf/cluster.conf"],
+            "cwd": "${workspaceFolder}",
+            "stopAtEntry": false,
+            "externalConsole": false,
+            "MIMode": "gdb",
+            "miDebuggerPath": "/usr/bin/gdb",
+            "preLaunchTask": "build: debug",
+            "setupCommands": [
+                { "description": "변수를 보기 좋게 출력", "text": "-enable-pretty-printing", "ignoreFailures": true },
+                { "description": "SIGPIPE에서 멈추지 않기", "text": "handle SIGPIPE nostop noprint pass", "ignoreFailures": true }
+            ]
+        },
+        {
             "name": "proxy 디버그",
             "type": "cppdbg",
             "request": "launch",

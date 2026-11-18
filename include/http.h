@@ -57,11 +57,20 @@ int http_parse_request(char *buf, struct http_request *req);
  * 성공 0, 형식 오류 -1, http가 아닌 스킴(https 등) -2 */
 int http_parse_url(struct http_request *req);
 
-/* 원서버에 보낼 HTTP/1.0 요청을 out에 만든다. 반환: 길이, 공간 부족 -1
- * ims가 NULL이 아니면 "If-Modified-Since: ims"를 붙인 조건부 요청을 만든다.
- * 클라이언트가 보낸 조건부 헤더(If-Modified-Since, If-None-Match)는 빼고 보낸다.
- * (프록시가 캐시에 저장할 "완전한 200 응답"을 받기 위해서) */
-int http_build_upstream_request(const struct http_request *req, const char *ims,
+/* 위(원서버 또는 다른 노드)로 보낼 요청을 어떻게 만들지 */
+struct upstream_opts {
+    int         absolute;   /* 1: 요청 대상을 절대 URL 그대로 (다른 노드 = 프록시에게 보낼 때)
+                               0: 경로만 (원서버에게 보낼 때) */
+    const char *ims;        /* NULL이 아니면 "If-Modified-Since: ims"를 붙인 조건부 요청 */
+    const char *via_name;   /* Via 헤더에 덧붙일 이 노드의 이름 (NULL이면 Via를 손대지 않음) */
+};
+
+/* 위로 보낼 HTTP/1.0 요청을 out에 만든다. 반환: 길이, 공간 부족 -1
+ *  - Connection: close 로 요청한다 (응답 끝 = 연결 종료)
+ *  - hop-by-hop 헤더와 클라이언트의 조건부 헤더(If-Modified-Since, If-None-Match)는 뺀다
+ *    (프록시가 캐시에 저장할 "완전한 200 응답"을 받기 위해서)
+ *  - Via: 기존 값 뒤에 "받은 버전 노드이름"을 덧붙인다 (RFC 9110 7.6.3) */
+int http_build_upstream_request(const struct http_request *req, const struct upstream_opts *o,
                                 char *out, size_t cap);
 
 /* 원서버 응답 헤더에서 캐시 판단에 필요한 정보 */
