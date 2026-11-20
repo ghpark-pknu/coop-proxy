@@ -1,9 +1,6 @@
 #!/usr/bin/env bash
 # 8단계 진단: 실험 ①의 처리량 천장(약 16k 요청/s)이 메인(accept) 스레드 때문인가
 #
-# 사용법
-#   ./scripts/diag_main.sh                    동시 8·64, 각 15초 (약 1분)
-#   CONCS="64" DUR=30 ./scripts/diag_main.sh
 # 바꿀 수 있는 값: CONCS="8 64"  DUR=15  WARM=2  SHARDS=1  KEYS=200  ZIPF=0.8
 #                  PROXY_CPUS, LOAD_CPUS (taskset 형식. 주지 않으면 exp_lock.sh처럼 물리 코어를 반으로 나눔)
 #

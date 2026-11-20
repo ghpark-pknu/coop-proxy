@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 # 개발환경 점검 스크립트
-# 사용법: 프로젝트 폴더에서  ./scripts/check_env.sh
 set -u
 
 pass=0

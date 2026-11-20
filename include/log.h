@@ -2,8 +2,6 @@
  * log.h — 실행 기록
  *
  * 요청 하나가 끝날 때마다 한 줄씩 남긴다. 맨 끝은 라우팅 정보 (클러스터 모드)
- *   ... [node1] 127.0.0.1:53422 GET http://127.0.0.1:9000/a.bin 200 7685B 3.1ms FORWARD →node2
- *   ... [node2] 127.0.0.1:41022 GET http://127.0.0.1:9000/a.bin 200 7685B 2.4ms MISS ←node1
  */
 #ifndef LOG_H
 #define LOG_H

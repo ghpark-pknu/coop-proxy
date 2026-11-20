@@ -1,10 +1,6 @@
 #!/usr/bin/env bash
 # 5단계(캐시 락 전략: 전역 mutex / 샤딩) 완료 기준 자동 점검
 #
-# 사용법:  ./scripts/test_stage5.sh              디버그 빌드로 점검
-#          MODE=tsan ./scripts/test_stage5.sh    데이터 경쟁 검사 빌드로 점검
-#          MODE=asan ./scripts/test_stage5.sh    메모리 오류 검사 빌드로 점검
-#
 # 완료 기준
 #   - 캐시 단위 테스트(cache_test) 통과: 샤드 고르기, 용량 나누기, 샤드별 LRU, 동시 접근
 #   - 캐시가 넘치지 않으면 -S 1과 -S 8이 같은 요청열에 같은 결과 (HIT·MISS·원서버 요청·락 획득 수)

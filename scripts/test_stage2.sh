@@ -1,10 +1,6 @@
 #!/usr/bin/env bash
 # 2단계(캐시) 완료 기준 자동 점검
 #
-# 사용법:  ./scripts/test_stage2.sh              디버그 빌드로 점검
-#          MODE=tsan ./scripts/test_stage2.sh    데이터 경쟁 검사 빌드로 점검
-#          MODE=asan ./scripts/test_stage2.sh    메모리 오류 검사 빌드로 점검
-#
 # 프록시를 설정만 바꿔 네 개 띄운다.
 #   A 18180  기본 설정 + 차단 목록         : HIT, 객체 상한, 차단, 클라이언트 조건부 헤더
 #   B 18181  용량 40KB, 객체 상한 20KB     : LRU 교체 순서

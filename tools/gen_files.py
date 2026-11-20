@@ -10,10 +10,6 @@
   big.bin     5MB 이진 파일       ─┘ (여러 번의 recv/send에 걸쳐 중계되는지 확인)
   obj/NNNN.bin  크기가 다양한 객체 N개 (3단계 부하 실험용, 1KB~512KB)
   manifest.json obj 목록과 크기 (부하 생성기가 읽음)
-
-사용 예
-  python3 tools/gen_files.py                       # ~/coop-data/www 에 생성
-  python3 tools/gen_files.py --count 500 --seed 7
 """
 import argparse
 import json

@@ -1,12 +1,7 @@
 #!/usr/bin/env bash
 # 6단계 실험 ①: 캐시 락 전략별 처리량 — 전역 mutex(-S 1) 대 샤딩(-S N), 네트워크 포함
 #
-# 사용법
-#   QUICK=1 ./scripts/exp_lock.sh      빠른 확인: 샤드 1·8 × 동시 8·32, 반복 1번, 측정 3초 (약 30초)
-#   ./scripts/exp_lock.sh              본 실험: 샤드 1·2·4·8·16 × 동시 1·2·4·8·16·32·64,
-#                                      반복 3번, 측정 10초 (약 25분)
-#
-# 바꿀 수 있는 값 (명령 앞에 붙인다. 예: REPEAT=5 DUR=20 ./scripts/exp_lock.sh)
+# 바꿀 수 있는 값
 #   SHARDS="1 2 4 8 16"   CONCS="1 2 4 8 16 32 64"   REPEAT=3   DUR=10   WARM=2
 #   ZIPF=0.8   KEYS=200
 #   PROXY_CPUS, LOAD_CPUS  taskset 형식("0-3", "0,1,4,5"). 주지 않으면 물리 코어를 반으로 나눠

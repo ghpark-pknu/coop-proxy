@@ -10,10 +10,6 @@ http.server를 바탕으로, 실험에 필요한 기능 세 가지를 더했다.
   3. 요청 수 세기   : 프록시가 원서버에 몇 번 왔는지 센다.
                       GET /__count → JSON으로 조회, GET /__reset → 0으로 초기화
                       (이 두 경로는 세지 않는다)
-
-사용 예
-  python3 tools/origin.py --port 9000 --dir ~/coop-data/www
-  python3 tools/origin.py --port 9001 --dir ~/coop-data/www --delay 3
 """
 import argparse
 import json

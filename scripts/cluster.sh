@@ -1,22 +1,14 @@
 #!/usr/bin/env bash
 # 원서버와 클러스터 노드를 한 번에 실행·종료한다
 #
-# 사용법
-#   ./scripts/cluster.sh start   [이름...]   실행 (이름을 안 주면 origin과 모든 노드)
-#   ./scripts/cluster.sh stop    [이름...]   종료 (노드마다 통계 요약 출력)
-#   ./scripts/cluster.sh restart [이름...]
-#   ./scripts/cluster.sh status
-#   이름: origin 또는 노드 목록 파일의 노드 이름 (node1, node2, node3)
-#
-# 환경 변수 (명령 앞에 붙여서 쓴다. 예: MODE=release ./scripts/cluster.sh start)
+# 환경 변수 (명령 앞에 붙여서 쓴다)
 #   MODE=debug|release|tsan|asan   빌드 모드 (기본 debug)
 #   CLUSTER=0                      노드 목록 없이 독립 프록시로 실행 (클러스터와 비교하는 실험용)
 #   CONF=conf/cluster.conf         노드 목록 파일
 #   PROXY_ARGS="-s 32M -q"         모든 노드에 덧붙일 프록시 옵션 (예: "-S 8" 캐시 샤드 8개)
 #   ORIGIN_PORT=9000               원서버 포트
 #   ORIGIN_DELAY=0                 원서버 응답 지연(초)
-#
-# 기록: ~/coop-data/logs/<이름>.log      실행 중인 프로세스 번호: ~/coop-data/run/<이름>.pid
+
 set -u
 cd "$(dirname "$0")/.." || exit 1
 
@@ -73,7 +65,7 @@ start_one() {
         nohup python3 tools/origin.py --port "$port" --dir "$WWW" --delay "$ORIGIN_DELAY" --quiet \
             < /dev/null > "$LOGDIR/origin.log" 2>&1 &
     elif [ "$CLUSTER" = 1 ]; then
-        # shellcheck disable=SC2086  (PROXY_ARGS는 일부러 단어로 나눈다)
+        # shellcheck disable=SC2086  (PROXY_ARGS는 일부러 단어로 나눔)
         nohup "build/$MODE/proxy" -n "$name" -C "$CONF" $PROXY_ARGS \
             < /dev/null > "$LOGDIR/$name.log" 2>&1 &
     else

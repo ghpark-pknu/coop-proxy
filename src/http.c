@@ -19,7 +19,7 @@
 
 /* buf[0..len)에서 헤더 끝 표시를 찾아 "헤더 끝 바로 다음 위치"를 반환한다.
  * 표준은 "\r\n\r\n"이지만, nc로 손으로 입력하면 "\n"만 들어오므로
- * "\n\n"도 받아 준다 (RFC 9112도 LF만 쓴 줄 끝을 허용할 수 있다고 함) */
+ * "\n\n"도 받아 준다. */
 static size_t find_head_end(const char *buf, size_t len)
 {
     const char *crlf = memmem(buf, len, "\r\n\r\n", 4);
@@ -137,14 +137,14 @@ int http_parse_request(char *buf, struct http_request *req)
         if (*line == '\0')
             break;                              /* 빈 줄 = 헤더 끝 */
         if (*line == ' ' || *line == '\t')
-            return -1;                          /* 옛 형식의 줄 이어쓰기(obs-fold)는 거부 */
+            return -1;                          /* 옛 형식의 줄 이어쓰기는 거부 */
 
         char *colon = strchr(line, ':');
         if (colon == NULL || colon == line)
             return -1;
         *colon = '\0';
         if (strpbrk(line, " \t") != NULL)
-            return -1;                          /* 이름과 ':' 사이에 공백 금지 (RFC 9112) */
+            return -1;                          /* 이름과 ':' 사이에 공백 금지 */
 
         if (req->nheaders == HTTP_MAX_HEADERS)
             return -1;
@@ -198,7 +198,7 @@ int http_parse_url(struct http_request *req)
     else if (*p == '/')
         req->path = p;
     else
-        return -1;          /* 예: "http://host?x" 처럼 경로 없이 쿼리가 오는 경우 */
+        return -1;          /* 예: 경로 없이 쿼리가 오는 경우 */
     return 0;
 }
 
@@ -223,7 +223,7 @@ static int is_hop_by_hop(const char *name)
 }
 
 /* "Connection: keep-alive, X-Foo" 처럼 Connection 헤더 값에 이름이 나열된
- * 헤더도 hop-by-hop으로 취급해야 한다 (RFC 9110 7.6.1) */
+ * 헤더도 hop-by-hop으로 취급해야 한다. */
 static int listed_in_connection(const struct http_request *req, const char *name)
 {
     size_t nlen = strlen(name);

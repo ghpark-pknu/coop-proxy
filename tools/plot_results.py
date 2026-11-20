@@ -1,19 +1,13 @@
 #!/usr/bin/env python3
 """실험 결과 그래프 (7단계) — 보고서에 넣을 PNG를 만든다.
 
-  python3 tools/plot_results.py lock    results/lock_X.csv       → results/lock_X_figs/
-  python3 tools/plot_results.py cluster results/cluster_X.csv    → results/cluster_X_figs/
-  python3 tools/plot_results.py soak    results/soak_X.csv       → results/soak_X_figs/   (8단계)
-
 같은 조건을 여러 번 잰 값은 중앙값을 점으로, 최소~최대를 세로 막대(오차 막대)로 그린다.
 
-그림 규칙 (보고서 인쇄용 정적 그림)
+그림 규칙
   - 색은 계열마다 정해진 순서로만 쓴다 (1 파랑, 2 주황, 3 청록, 4 노랑, 5 분홍): 색맹 시뮬레이션으로
     이웃한 색끼리 구별되는지 검증된 순서. 샤드 1·2·4·8·16 = 1~5번 색, 항상 같은 샤드 = 같은 색
   - y축은 하나만 (단위가 다르면 그림을 나눈다), 계열이 둘 이상이면 범례
   - 선 1.5pt, 점에는 바탕색 테두리, 격자는 옅은 실선
-한글 글꼴: 나눔고딕·Noto Sans CJK KR을 찾고, 없으면 Windows의 맑은 고딕(/mnt/c/Windows/Fonts/malgun.ttf)을
-WSL에서 직접 불러온다. 그것도 없으면 'sudo apt install fonts-nanum'을 안내한다.
 """
 import argparse
 import os

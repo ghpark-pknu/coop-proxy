@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
 """실험 ② 결과 요약: 독립 프록시 3개 대 협력형 클러스터 3노드 (7단계)
 scripts/exp_cluster.sh가 만든 CSV를 노드 하나의 캐시 용량별 표로 보여 준다. 반복은 중앙값으로 합친다.
-
-  python3 tools/cluster_summary.py results/cluster_20261118_140000.csv
 """
 import argparse
 import sys

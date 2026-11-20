@@ -1,10 +1,6 @@
 #!/usr/bin/env bash
 # 6단계 측정 도구(C 부하 도구 loadc) 점검: 도구가 센 값이 프록시의 기록과 정확히 맞는가
 #
-# 사용법:  ./scripts/test_stage6.sh              디버그 빌드로 점검
-#          MODE=tsan ./scripts/test_stage6.sh    데이터 경쟁 검사 빌드로 점검
-#          MODE=asan ./scripts/test_stage6.sh    메모리 오류 검사 빌드로 점검
-#
 # 시험용 포트: 프록시 18581·18582, 아무도 듣지 않는 포트 18589, 원서버 19500,
 #             가짜 서버 19581(본문이 잘린 응답)·19582(404)
 # 객체: ~/coop-data/www-small (1KB 객체 200개, 없으면 만든다)

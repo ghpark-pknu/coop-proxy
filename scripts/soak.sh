@@ -1,10 +1,6 @@
 #!/usr/bin/env bash
 # 8단계 검증: 장시간 부하 — 클러스터 3노드에 오래 부하를 걸면서 노드마다 메모리(RSS)·열린 파일 수·스레드 수를 기록한다
 #
-# 사용법
-#   ./scripts/soak.sh                        30분, 10초마다 기록
-#   MIN=60 ./scripts/soak.sh                 60분
-#   SEC=40 INTERVAL=2 ./scripts/soak.sh      짧게 (점검용)
 # 바꿀 수 있는 값: MIN=30 (또는 초 단위 SEC)  INTERVAL=10  CONC=8  SIZE=2M  VALIDATE=5  ZIPF=0.8
 #
 # 조건: 객체 200개(1KB~512KB, 합 약 11.7MB, ~/coop-data/www), 노드당 캐시 2MB → 교체가 쉬지 않고 일어난다.
@@ -22,6 +18,7 @@
 #     다음을 위해 쥐고 있고, 스레드마다 다른 아레나(할당 구역)를 쓰며 크기가 제각각인 객체(1KB~512KB)를
 #     오래 할당·해제하면 빈 공간이 조각나 RSS는 천천히 늘 수 있다. 이때 heap_system(할당기가 받아 둔 양)도
 #     같이 늘고 heap_in_use는 그대로다 → 누수가 아니라 할당기의 보관분이다.
+#
 # 결과: results/soak_날짜_시각.csv (기록 1번 × 노드 = 한 줄), .env
 #       그래프: python3 tools/plot_results.py soak results/soak_날짜_시각.csv
 set -u

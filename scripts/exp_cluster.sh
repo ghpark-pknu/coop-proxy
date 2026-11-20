@@ -1,11 +1,6 @@
 #!/usr/bin/env bash
 # 7단계 실험 ②: 독립 프록시 3개 대 협력형 클러스터 3노드 — 노드 하나의 캐시 용량별
 #
-# 사용법
-#   QUICK=1 ./scripts/exp_cluster.sh     빠른 확인: 용량 1M·4M, 요청 1500개(예열 500개), 반복 1번 (약 1분)
-#   ./scripts/exp_cluster.sh             본 실험: 용량 512K·1M·2M·4M·8M·16M, 요청 6000개(예열 3000개),
-#                                        반복 2번 (약 10분)
-#
 # 바꿀 수 있는 값: SIZES="512K 1M 2M 4M 8M 16M"  N=6000  WARMUP=3000  CONC=16  DELAY=0.05  ZIPF=0.8
 #                  REPEAT=2  SEED=2026  RATE=0
 #   RATE: 초당 요청 수 상한 (0 = 제한 없음, 8단계). loadgen.py는 Python이라 초당 약 2,000개가 한계여서,

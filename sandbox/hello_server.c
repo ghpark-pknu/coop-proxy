@@ -1,5 +1,5 @@
 /*
- * hello_server.c — 개발환경 검증용 최소 HTTP 서버 (본 프로젝트 코드가 아님)
+ * hello_server.c — 개발환경 검증용 최소 HTTP 서버
  *
  * 이 파일 하나로 다음이 모두 동작하는지 확인한다.
  *   - 소켓 API: socket → bind → listen → accept → read/write → close
@@ -34,7 +34,7 @@ static void die(const char *msg)
 }
 
 /* write()는 요청한 길이보다 적게 쓰고 돌아올 수 있다(부분 쓰기).
- * 그래서 전부 보낼 때까지 반복한다. 프록시에서도 그대로 쓰게 될 패턴이다. */
+ * 그래서 전부 보낼 때까지 반복한다. 프록시에서도 그대로 쓰게 될 패턴. */
 static int write_all(int fd, const char *buf, size_t len)
 {
     while (len > 0) {
@@ -75,7 +75,7 @@ static void *handle_client(void *arg)
             printf("[#%lu] tid=%d  %s\n", no, (int)gettid(), req);
 
         /* 본문 길이는 항상 같게 두고(ab는 길이가 달라지면 실패로 셈),
-         * 요청 번호와 스레드 ID는 헤더로 보낸다. curl -i 로 확인할 수 있다. */
+         * 요청 번호와 스레드 ID는 헤더로 보낸다. curl -i로 확인할 수 있다. */
         const char *body = "hello from WSL\n";
         char resp[512];
         int rlen = snprintf(resp, sizeof resp,

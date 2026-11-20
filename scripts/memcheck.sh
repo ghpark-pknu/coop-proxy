@@ -1,11 +1,8 @@
 #!/usr/bin/env bash
 # 8단계 검증: Valgrind memcheck — 메모리 누수와 잘못된 메모리 접근을 ASan과 다른 방법으로 한 번 더 확인한다
 #
-# 사용법:  ./scripts/memcheck.sh             요청 3000개 (약 1~3분)
-#          N=10000 ./scripts/memcheck.sh
-#
 # ASan은 컴파일할 때 검사 코드를 끼워 넣는다. Valgrind는 이미 컴파일된 프로그램을 가상 CPU 위에서 명령 하나씩
-# 실행하면서 모든 메모리 읽기·쓰기와 malloc/free를 추적한다 (다시 컴파일할 필요는 없지만 20~50배 느리다).
+# 실행하면서 모든 메모리 읽기·쓰기와 malloc/free를 추적한다.
 # 방식이 달라서 한쪽이 놓친 문제를 다른 쪽이 잡을 수 있다. 둘은 함께 쓸 수 없으므로 새니타이저가 없는
 # debug 빌드(-O0 -g)를 쓴다.
 #
@@ -16,11 +13,13 @@
 #       헤더를 보내다 멈춘 연결(송수신 제한 시간이 지나면 닫힘)
 #   [3] node2를 끈 뒤 node1에 요청 N/3개: 담당 노드 연결 실패 → 2순위(자기 자신)로 대체하는 경로
 #   끝: SIGTERM → 프록시가 정상 종료 절차(연결 정리, 캐시 해제)를 밟은 뒤 Valgrind가 보고서를 쓴다
+#
 # 판정: definitely lost 0, indirectly lost 0, 메모리 오류 0, 종료 때 프록시가 연 파일 0개(표준 입출력 제외)
 #   definitely lost: 가리키는 포인터가 하나도 남지 않은 메모리 (확실한 누수)
 #   indirectly lost: 누수된 블록 안에서만 가리키던 메모리 (누수의 딸림)
 #   possibly lost  : 블록 중간을 가리키는 포인터만 남은 메모리 (참고만 한다)
 #   still reachable: 종료 때까지 전역 변수 등이 가리키던 메모리 (누수 아님)
+#
 # 결과: results/memcheck_날짜_시각.log (Valgrind 보고서 전체)
 set -u
 cd "$(dirname "$0")/.." || exit 1

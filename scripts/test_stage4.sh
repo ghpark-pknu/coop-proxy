@@ -1,10 +1,6 @@
 #!/usr/bin/env bash
 # 4단계(실시간 관제: /__stats, /__dashboard, Zipf 부하 생성기) 완료 기준 자동 점검
 #
-# 사용법:  ./scripts/test_stage4.sh              디버그 빌드로 점검
-#          MODE=tsan ./scripts/test_stage4.sh    데이터 경쟁 검사 빌드로 점검
-#          MODE=asan ./scripts/test_stage4.sh    메모리 오류 검사 빌드로 점검
-#
 # 시험용 포트: 클러스터 node1·node2·node3 18381~18383, 비교용 독립 프록시 18391~18393,
 #             원서버 19300, 관제 화면 파일 찾기 시험 18387·18388, 아무도 듣지 않는 포트 18389
 # 노드는 -q(요청 기록 생략)와 -v 600(검증 주기 10분: 시험 도중 재검증이 끼어들지 않게)으로 띄운다.

@@ -2,8 +2,7 @@
 """Zipf 분포 부하 생성기 — 협력형 웹 캐싱 프록시 실험용 (4단계)
 
 웹 객체의 인기도는 소수에 몰린다. k번째로 인기 있는 객체가 요청될 확률이 1/k^s 에
-비례하는 분포를 Zipf 분포라 하고, 실제 프록시 기록에서는 s가 0.64~0.83 정도였다
-(Breslau et al., "Web Caching and Zipf-like Distributions", IEEE INFOCOM 1999).
+비례하는 분포를 Zipf 분포라 하고, 실제 프록시 기록에서는 s가 0.64~0.83 정도였다.
 이 도구는 그런 요청열을 만들어 프록시(클러스터 또는 독립 프록시들)에 보내고
 응답 시간, 히트율, 원서버 요청 수를 잰다.
 
@@ -12,13 +11,6 @@
     진입 노드에 연결할 수 없으면 목록의 다음 노드로 다시 연결한다 (--no-retry로 끔).
     연결이 된 뒤의 실패는 다시 보내지 않는다 (같은 요청이 두 번 세어지지 않게).
   - 받은 본문은 원본 파일과 CRC32로 비교한다 (원본이 없는 PC에서 실행하면 크기만 비교).
-
-사용 예:
-  python3 tools/loadgen.py                              # 8081~8083 노드에 요청 2000개, 동시 8개
-  python3 tools/loadgen.py -n 5000 -c 16 --stats        # 노드 /__stats 변화량과 맞춰 보기
-  python3 tools/loadgen.py -d 60 -c 4 --rate 300        # 60초 동안 초당 300개 (관제 화면 시연)
-  python3 tools/loadgen.py --dry-run -n 5000            # 요청 없이 요청열의 성질만 분석
-  python3 tools/loadgen.py --csv run.csv --json run.json
 
 종료 코드: 0 모두 성공 / 1 실패한 요청 있음 / 2 준비 실패(옵션·파일·원서버) / 3 --stats 확인 불일치
 """

@@ -1,10 +1,5 @@
 #!/usr/bin/env bash
 # 1단계(중계 프록시) 완료 기준 자동 점검
-#
-# 사용법:  ./scripts/test_stage1.sh              디버그 빌드로 점검
-#          MODE=tsan ./scripts/test_stage1.sh    데이터 경쟁 검사 빌드로 점검
-#          MODE=asan ./scripts/test_stage1.sh    메모리 오류 검사 빌드로 점검
-#
 # 손으로 띄운 프록시(8080)·원서버(9000)와 겹치지 않도록 다른 포트를 쓴다.
 set -u
 cd "$(dirname "$0")/.." || exit 1

@@ -211,7 +211,7 @@ int router_rank(const char *key, int *order, uint64_t *scores)
 /* Via 검사 (루프 방지)                                                 */
 /* ------------------------------------------------------------------ */
 
-/* Via 값의 형식 (RFC 9110 7.6.3):
+/* Via 값의 형식 :
  *   Via: 1.1 node1, 1.0 node2 (주석)
  *   원소 = 받은-프로토콜 공백 받은-노드 [공백 주석], 원소끼리는 쉼표로 구분 */
 int router_via_peer(const struct http_request *req)

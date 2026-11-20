@@ -1,26 +1,5 @@
 /*
  * control.c — 관제 요청 처리: /__stats(JSON), /__dashboard(HTML)
- *
- * /__stats 응답 예 (값은 모두 프로그램이 시작한 뒤의 누적값)
- * {
- *   "node": "node1", "mode": "cluster", "uptime_ms": 81234, "active_connections": 2,
- *   "requests": { "client": 120, "peer": 41 },
- *   "outcomes": { "HIT": 90, "VALIDATED": 0, ..., "FORWARD": 70, "BLOCKED": 0, "ERROR": 0 },
- *   "origin_requests": 21, "peer_failures": 0, "bytes": 1234567,
- *   "memory": { "heap_in_use": 4793616, "heap_system": 22020096 },          ← 8단계
- *   "latency": {
- *     "bounds_us": [50, 100, ...],                      ← 히스토그램 구간 경계
- *     "client": { "count": 120, "sum_us": 98765, "max_us": 4321, "hist": [ ... ] },
- *     "peer":   { "count": 41,  "sum_us": 12345, "max_us": 999,  "hist": [ ... ] }
- *   },
- *   "cache": { "enabled": true, "objects": 30, "bytes": 2345678, "capacity": 67108864,
- *              "max_object": 1048576, "evictions": 0, "shards": 4,
- *              "shard_objects": [8, 7, 9, 6], "shard_bytes": [...] },          ← 5단계
- *   "locks": { "cache": { "acquires": 9120, "contended": 12, "wait_us": 340 },   ← 5단계
- *              "stats": { "acquires": 4560, "contended": 3, "wait_us": 41 } },
- *   "config": { "validate_sec": 60, "peer_retry_ms": 5000, "cache_shards": 4 },
- *   "cluster": [ { "name": "node1", "host": "127.0.0.1", "port": 8081, "self": true, "available": true }, ... ]
- * }
  */
 #include "control.h"
 #include "cache.h"

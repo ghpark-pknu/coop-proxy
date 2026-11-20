@@ -89,7 +89,7 @@ static void find_dashboard(char *out, size_t cap)
     if (n <= 0)
         return;
     exe[n] = '\0';
-    for (int up = 0; up < 3; up++) {            /* .../coop-proxy/build/debug/proxy → .../coop-proxy */
+    for (int up = 0; up < 3; up++) {
         char *slash = strrchr(exe, '/');
         if (slash == NULL)
             return;
@@ -104,7 +104,7 @@ static void find_dashboard(char *out, size_t cap)
         out[0] = '\0';
 }
 
-/* 바이트 수를 사람이 읽기 좋게 */
+/* 바이트 수를 읽기 좋게 */
 static void human_size(size_t b, char *out, size_t cap)
 {
     if (b >= 1024 * 1024)

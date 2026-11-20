@@ -10,10 +10,6 @@
   ⑩ 메인(accept) 스레드가 쓴 CPU        ← 7단계 CSV에만 있음
   ⑪ 자료구조만 잰 배율 대 프록시 전체 배율  ← 같은 이름의 _bench.csv가 있으면
 6단계 형식(19열) CSV도 그대로 읽는다. 없는 열의 표는 건너뛴다.
-
-사용 예:
-  python3 tools/lock_summary.py results/lock_20261118_122931.csv
-  python3 tools/lock_summary.py results/lock_A.csv results/lock_B.csv    # 여러 번 잰 것을 합쳐서
 """
 import argparse
 import statistics

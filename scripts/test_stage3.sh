@@ -1,10 +1,6 @@
 #!/usr/bin/env bash
 # 3단계(미니 CDN: 협력형 캐시 클러스터) 완료 기준 자동 점검
 #
-# 사용법:  ./scripts/test_stage3.sh              디버그 빌드로 점검
-#          MODE=tsan ./scripts/test_stage3.sh    데이터 경쟁 검사 빌드로 점검
-#          MODE=asan ./scripts/test_stage3.sh    메모리 오류 검사 빌드로 점검
-#
 # 시험용 클러스터: node1·node2·node3 (포트 18281~18283)
 #   노드 이름이 conf/cluster.conf와 같으므로 담당 노드도 같다 (담당은 이름으로 계산).
 # 기대하는 담당 노드는 rendezvous_test(같은 router.c)로 계산해서 비교한다.
